@@ -46,8 +46,11 @@ logs/
 # Uploads (optional, uncomment if needed)
 # uploads/
 
-# Config with secrets (optional, uncomment if needed)
-# app/config/config.yaml
+# Config with secrets - DO NOT commit
+app/config/config.yaml
+
+# Strange directories
+~/
 
 # Python cache (from reference files)
 __pycache__/

@@ -1,0 +1,45 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+  timeout: 60
+  workers: 4
+
+
+llm_config:
+  api_key: "your-api-key-here"
+  api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen-plus"
+
+mysql:
+  host: mysql-prod
+  port: 3306
+  username: root
+  password: your-password-here
+  db_name: contract_review
+  pool_size: 10
+  pool_timeout: 30
+
+redis:
+  host: redis-prod
+  port: 6379
+  db: 0
+  password:
+  socket_connect_timeout: 5
+  socket_timeout: 10
+
+jwt:
+  secret_key: your-secret-key-here
+  refresh_secret_key: your-refresh-secret-key-here
+  access_token_expire_minutes: 10080
+  refresh_token_expire_days: 7
+
+oss:
+  endpoint:
+  access_key:
+  secrete_key:
+  bucket_name:
+
+cas:
+  login-url: "https://ids.cqupt.edu.cn/authserver/login"
+  logout-url: "https://ids.cqupt.edu.cn/authserver/logout"
+  service-callback: "http://your-api.example.com/cas/callback"
