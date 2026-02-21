@@ -1,0 +1,66 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# Build output
+bin/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Uploads (optional, uncomment if needed)
+# uploads/
+
+# Config with secrets (optional, uncomment if needed)
+# app/config/config.yaml
+
+# Python cache (from reference files)
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.Python/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Database files (if using local db)
+*.db
+*.sqlite
