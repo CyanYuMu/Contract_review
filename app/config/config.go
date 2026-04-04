@@ -53,11 +53,23 @@ type JWTConfig struct {
 	RefreshTokenExpireDays int    `mapstructure:"refresh_token_expire_days"`
 }
 
+type CASConfig struct {
+	//// CAS认证中心地址（重邮统一身份认证地址）
+	CasServerURL string `mapstructure:"cas_server_url"`
+	// 你的服务回调地址（已在认证中心绑定）
+	ServiceURL string `mapstructure:"service_url"`
+	// Session加密密钥（生产环境替换为随机强密钥）
+	SessionSecret string `mapstructure:"session_secret"`
+	//Cookie名称
+	SessionCookieName string `mapstructure:"session_cookie_name"`
+}
+
 type Config struct {
 	Server    *Server    `mapstructure:"server"`
 	LLMConfig *LLMConfig `mapstructure:"llm_config"`
 	Mysql     *Mysql     `mapstructure:"mysql"`
 	Redis     *Redis     `mapstructure:"redis"`
+	CasConfig *CASConfig `mapstructure:"cas_config"`
 	JWT       *JWTConfig `mapstructure:"jwt"`
 	OSS       *OSS       `mapstructure:"oss"`
 }
