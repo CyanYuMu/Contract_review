@@ -1,0 +1,108 @@
+.isActive {
+  color: #155dfc;
+  background-color: white;
+}
+
+.editor-area {
+  background: #dedede;
+  position: relative;
+  z-index: 1;
+}
+
+/* 隐藏外层容器的滚动条 */
+.word-scroll-area {
+  overflow: hidden !important;
+}
+
+/* 给editor内部真实的滚动容器和风险列表添加统一的滚动条样式 */
+[editor-component="main"],
+.risk-scroll-area {
+  overflow-y: scroll !important;
+  scrollbar-width: thin !important;
+  scrollbar-color: rgba(0, 0, 0, 0.3) transparent !important;
+}
+
+[editor-component="main"]::-webkit-scrollbar,
+.risk-scroll-area::-webkit-scrollbar {
+  width: 6px !important;
+  height: 6px !important;
+}
+
+[editor-component="main"]::-webkit-scrollbar-track,
+.risk-scroll-area::-webkit-scrollbar-track {
+  background: transparent !important;
+}
+
+[editor-component="main"]::-webkit-scrollbar-thumb,
+.risk-scroll-area::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.3) !important;
+  border-radius: 3px !important;
+}
+
+[editor-component="main"]::-webkit-scrollbar-thumb:hover,
+.risk-scroll-area::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.5) !important;
+}
+
+.topbar {
+  background: #155dfc;
+  position: relative;
+  z-index: 5;
+}
+.topbar .ant-tabs {
+  color: #fff;
+}
+.topbar .ant-tabs-nav {
+  margin: 0;
+}
+.topbar .ant-tabs-card > .ant-tabs-nav .ant-tabs-tab {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  padding: 6px 18px;
+  margin-right: 8px;
+}
+.topbar .ant-tabs-card > .ant-tabs-nav .ant-tabs-tab-active {
+  background: #fff;
+  color: #298dff;
+  border-color: #fff;
+}
+.topbar .ant-tabs-nav::before {
+  border-bottom: none;
+}
+.topbar .ant-tabs-ink-bar {
+  display: none;
+}
+.topbar-title {
+  color: #fff;
+  font-weight: 600;
+}
+
+.side-tabs .ant-tabs-nav {
+  margin: 0;
+}
+.side-tabs .ant-tabs-nav::before {
+  border-bottom: none;
+}
+.side-tabs .ant-tabs-content-holder {
+  height: calc(100% - 44px);
+} /* nav 高度约 44px */
+.side-tabs .ant-tabs-content {
+  height: 100%;
+}
+.side-tabs .ant-tabs-tabpane {
+  height: 100%;
+}
+.side-tabs .ant-tabs-nav .ant-tabs-tab[data-node-key="risk"] {
+  margin-left: 12px;
+}
+.side-tabs.ant-tabs-card > .ant-tabs-nav .ant-tabs-tab {
+  background: rgba(0, 0, 0, 0.04);
+  border-bottom: none;
+}
+.side-tabs.ant-tabs-card > .ant-tabs-nav .ant-tabs-tab-active {
+  background: #fff;
+  color: #155dfc;
+}

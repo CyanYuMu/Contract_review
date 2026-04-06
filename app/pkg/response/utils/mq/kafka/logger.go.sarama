@@ -1,0 +1,28 @@
+package kafka
+
+import (
+	"fmt"
+	"gitlab.outer.staruniongame.com/aiart/seago/utils/su_logger"
+)
+
+//Print(v ...interface{})
+//Printf(format string, v ...interface{})
+//Println(v ...interface{})
+
+type Logger struct {
+}
+
+func (l *Logger) Print(v ...interface{}) {
+	msg := fmt.Sprint(v...)
+	su_logger.Info(nil, msg)
+}
+
+func (l *Logger) Printf(format string, v ...interface{}) {
+	s := fmt.Sprintf(format, v...)
+	su_logger.Info(nil, s)
+}
+
+func (l *Logger) Println(v ...interface{}) {
+	msg := fmt.Sprint(v...)
+	su_logger.Info(nil, msg)
+}

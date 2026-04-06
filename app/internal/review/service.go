@@ -2,9 +2,12 @@ package review
 
 import (
 	"context"
+	"contract_review/app/internal/agent"
 	"contract_review/app/internal/global"
 	"contract_review/app/internal/middleware/redis"
+	"contract_review/app/internal/rag"
 	"contract_review/app/internal/session"
+	"contract_review/app/internal/tools"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,8 +29,9 @@ type ReviewService struct {
 	sessionRepo      *session.SessionRepo
 	cache            *redis.RedisClient
 	llm              *arkbot.ChatModel
-	basePrompt       string            // 基础审阅提示词
-	contractPrompts  map[string]string // 不同合同类型的提示词
+	orchestrator     *agent.ReviewOrchestrator // Agent 编排器
+	basePrompt       string                   // 基础审阅提示词
+	contractPrompts  map[string]string        // 不同合同类型的提示词
 }
 
 // NewReviewService 创建审阅服务
@@ -584,7 +588,120 @@ func (s *ReviewService) CalculateOverallRisk(totalIssues int) string {
 	return "低"
 }
 
-// 默认基础提示词
+// ============ Agent 模式审阅 (新架构) ============
+
+// InitOrchestrator 初始化 Agent 编排器
+func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
+	if s.llm == nil {
+		if err := s.InitLLM(ctx); err != nil {
+			return fmt.Errorf("初始化 LLM 失败: %w", err)
+		}
+	}
+
+	llmGenerate := func(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
+		return s.llm.Generate(ctx, messages)
+	}
+
+	keywordIndex := rag.NewSimpleKeywordIndex()
+	retrieverConfig := rag.DefaultRetrieverConfig()
+	ragRetriever := rag.NewRAGRetriever(nil, keywordIndex, nil, retrieverConfig)
+
+	ragSearchTool := tools.NewRAGSearchTool(ragRetriever)
+	ruleVerifierTool := tools.NewRuleVerifierTool(llmGenerate)
+	contractContextTool := tools.NewContractContextTool(agent.ContractMeta{}, "")
+
+	riskTools := []agent.Tool{ragSearchTool, ruleVerifierTool, contractContextTool}
+	suggestionTools := []agent.Tool{ragSearchTool, contractContextTool}
+
+	orchConfig := agent.DefaultOrchestratorConfig()
+	s.orchestrator = agent.NewReviewOrchestrator(llmGenerate, riskTools, suggestionTools, orchConfig)
+
+	global.Log.Info("Agent 编排器初始化完成")
+	return nil
+}
+
+// AgentReviewContract 使用 Agent 架构审阅合同
+// 替代原有的 ProcessContractReview 暴力分块 + 并发 LLM 调用
+func (s *ReviewService) AgentReviewContract(
+	ctx context.Context,
+	task *ReviewTask,
+	contractContent string,
+	resultChan chan<- ChunkResult,
+) error {
+	if s.orchestrator == nil {
+		if err := s.InitOrchestrator(ctx); err != nil {
+			return fmt.Errorf("初始化 Agent 编排器失败: %w", err)
+		}
+	}
+
+	meta := agent.ContractMeta{
+		ContractType: task.ContractType,
+		Stance:       task.Stance,
+		Intensity:    task.Intensity,
+	}
+
+	if err := s.UpdateTaskStatus(ctx, task.ID, "processing"); err != nil {
+		return err
+	}
+
+	s.orchestrator.SetProgressCallback(func(event agent.ProgressEvent) {
+		global.Log.Info("Agent 进度",
+			zap.String("phase", event.Phase),
+			zap.String("agent", event.Agent),
+			zap.String("status", event.Status),
+			zap.String("message", event.Message),
+			zap.Float64("progress", event.Progress))
+	})
+
+	report, err := s.orchestrator.ReviewContract(ctx, contractContent, meta)
+	if err != nil {
+		global.Log.Error("Agent 审阅失败", zap.Error(err))
+		return fmt.Errorf("Agent 审阅失败: %w", err)
+	}
+
+	for i, finding := range report.Findings {
+		legalBasisStr := ""
+		for _, lb := range finding.LegalBasis {
+			legalBasisStr += fmt.Sprintf("%s %s: %s\n", lb.Source, lb.Article, lb.Content)
+		}
+
+		var suggestedContent, reason string
+		for _, sug := range report.Suggestions {
+			if sug.RiskFindingID == finding.ClauseID {
+				suggestedContent = sug.SuggestedText
+				reason = sug.Reason
+				if sug.LegalReference != "" {
+					reason += "\n法律依据: " + sug.LegalReference
+				}
+				break
+			}
+		}
+
+		if suggestedContent == "" && len(report.Suggestions) > i {
+			suggestedContent = report.Suggestions[i].SuggestedText
+			reason = report.Suggestions[i].Reason
+		}
+
+		mod := ModificationItem{
+			Position:         finding.ClauseID,
+			OriginalContent:  finding.OriginalText,
+			RiskAnalysis:     finding.RiskDescription + "\n\n法律依据:\n" + legalBasisStr,
+			RiskLevel:        finding.RiskLevel,
+			SuggestedContent: suggestedContent,
+			Reason:           reason,
+			RiskType:         finding.RiskType,
+		}
+
+		resultChan <- ChunkResult{
+			Index:         i,
+			Modifications: []ModificationItem{mod},
+		}
+	}
+
+	return nil
+}
+
+// 默认基础提示词（保留用于旧模式兼容）
 const defaultBasePrompt = `你是一名专业的法律顾问，专注于合同审查与风险分析。请站在{stance}的角度，对以下合同内容进行全面审阅。
 
 你需要：

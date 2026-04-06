@@ -1,0 +1,196 @@
+.content {
+    display: flex;
+    flex-direction: row;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    overflow-y: auto;
+    background-color: #FFFFFF;
+    padding: 1.875rem;
+    gap: 1.875rem;
+    flex-wrap: wrap;
+}
+
+.left-content {
+    flex: 1;
+    height: 100%;
+    min-width: 300px;
+}
+
+
+.right-content {
+    flex: 0 0 486px;
+    min-width: 300px;
+    height: 100%;
+}
+
+.topCard {
+    display: flex;
+    color: #FFFFFF;
+    font-size: 1rem;
+    gap: 1.21875rem;
+    flex-wrap: wrap;
+}
+
+.topCardL {
+    flex: 1;
+    min-width: 280px;
+    border-radius: 0.31rem;
+    background: #2260F2;
+    align-items: center;
+    justify-content: space-around;
+    padding: 1rem;
+}
+
+.topCardR {
+    flex: 0 0 30.88rem;
+    min-width: 280px;
+    height: 6.69rem;
+    border-radius: 0.31rem;
+    align-items: center;
+    justify-content: space-around;
+    background-color: #ED8C2B;
+}
+
+.stat-number {
+    line-height: normal;
+    font-weight: bold;
+    font-size: 1.5rem;
+    margin: 0.2rem 0;
+}
+
+.middleCard {
+    padding-top: 1.88rem;
+    margin-top: 1rem;
+}
+
+.middleCard .flex {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.52rem;
+    justify-content: flex-start;
+}
+
+.review_data {
+    height: 6.06rem;
+    font-size: 0.88rem;
+    flex: 0 0 calc(16.66% - 1.52rem);
+    min-width: 120px;
+    border-radius: 0.31rem;
+    background: #F2F8FF;
+    margin-top: 1.25rem;
+    border: 0.06rem solid #E8F3FF;
+    padding: 0.5rem 0.96rem;
+}
+
+/* 趋势图+词云图容器 */
+.trendBox {
+    display: flex;
+    justify-content: space-between;
+    overflow: hidden;
+    padding-right: 30px;
+    margin-top: 2rem;
+    flex: 1;
+    display: flex;
+    width: 100%;
+    gap: 1rem;
+    align-items: flex-start;
+}
+
+.trendChart{
+    height: 480px;
+    width:  100%;
+}
+
+.reviewWordCloud {
+    height: 500px;
+    /* max-width: 600px;  */
+    margin: 0;
+    padding: 0 0.5rem;
+}
+
+.rankBox {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    /* min-height: 850px; */
+    gap: 0.5rem;
+    border-left: 2px dashed rgb(222, 222, 222);
+    padding-left: 1.875rem;
+}
+
+.rankBg {
+   overflow: hidden;
+    width: 100%;
+    max-width: 486px;
+    height: 50%;
+    /* min-height: 395px; */
+    border-radius: 5px;
+    background: rgba(242, 248, 255, 1);
+    border: 1px solid rgba(224, 234, 255, 1);
+    padding: 0.625rem;
+}
+
+.rank {
+    width: 100%;
+    max-width: 416px;
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 1);
+    margin-top: 1.5625rem ;
+    padding-bottom: 0.5rem;
+    margin-left: 0.5rem;
+}
+
+.up,
+.down {
+    display: inline-block;
+    width: 9px;
+    height: 8px;
+    opacity: 1;
+    clip-path: polygon(50% 0%, 0% 100%, 50% 60%, 100% 100%);
+}
+
+.up {
+    background: linear-gradient(180deg, rgba(34, 96, 242, 1) 0%, rgba(34, 96, 242, 0.93) 19.9%, rgba(34, 96, 242, 0) 100%);
+}
+
+.down {
+    bottom: 1rem;
+    transform: rotate(180deg);
+    background: linear-gradient(180deg, rgba(255, 87, 51, 1) 12.5%, rgba(255, 176, 158, 0) 100%);
+}
+
+.svg {
+    display: inline-block;
+    width: 0.31rem;
+    height: 1.56rem;
+    background-color: #2260F2;
+    margin-right: 10px;
+}
+
+.titleBox {
+    display: flex;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.title {
+    color: #000000;
+    font-family: SourceHanSansCN;
+    font-weight: bold;
+    font-size: 1.13rem;
+    line-height: normal;
+    letter-spacing: 0rem;
+    text-align: left;
+    padding-right: 0.63rem;
+}
+
+.describe {
+    color: #4D4D4D;
+    font-family: SourceHanSansCN;
+    font-weight: normal;
+    font-size: 0.88rem;
+    line-height: normal;
+    letter-spacing: 0rem;
+    text-align: left;
+}

@@ -1,0 +1,700 @@
+"use client";
+
+import React, {useEffect, useMemo, useRef, useState,useCallback,} from "react";
+import "./page.css";
+import Editor, {
+  EditorMode,
+  type IEditorData,
+  type IEditorOption,
+  type IElement,
+  PageMode,
+} from "@/lib/canvas-editor/editor";
+import {type EditorState as EditorStateType, useEditorListeners,} from "@/hooks/useEditorListeners";
+import {markdownPlugin} from "@/lib/canvas-editor/plugins/markdown";
+import RiskCard from "@/components/review/RiskCard.v2";
+import Topbar from "@/components/Topbar";
+import EditorToolbar from "@/components/editor/EditorToolbar";
+import {UploadStore} from "@/store/uploadStore";
+import {RiskStore} from "@/store/riskStore";
+import Signboard from "@/components/signboard/Signboard";
+import ReviewHistory from "@/components/list/ReviewHistory";
+import ContrastHistory from "@/components/list/ContrastHistory";
+import type {TabType} from "@/components/TopbarTabs";
+import type {User,ApiError} from "@/lib/Interface";
+import {getUserInfo} from "@/lib/api/user";
+import LoginModal from "@/components/auth/LoginModal";
+import {Button, Space} from "antd";
+import {useRouter} from "next/navigation";
+import {save as saveApi} from "@/lib/api/upload";
+import {resolveFileUrl} from "@/utils/url";
+import ContractContrastPanel from "@/components/contrast/ContractContrastPanel";
+import {authDatedHandler} from "@/utils/authDatedHandler";
+import { buildStaticFileUrl } from '@/utils/url';
+export default function ReviewPageContent() {
+    const [activeTab, setActiveTab] = useState<TabType>("check");
+    const [user, setUser] = useState<User | null>(null);
+    const [loginVisible, setLoginVisible] = useState(false);
+    const [editorKey, setEditorKey] = useState(0);
+    const [shouldRenderEditor, setShouldRenderEditor] = useState(false);
+    const [isLoadingDocument, setIsLoadingDocument] = useState(false);
+    const [documentError, setDocumentError] = useState<string | null>(null);
+    const canvasContainerRef = useRef<HTMLDivElement>(null);
+    const canvasEditorRef = useRef<InstanceType<typeof Editor> | null>(null);
+    const [editorState, setEditorState] = useState<EditorStateType | null>(null);
+    const lastTabRef = useRef<TabType>("check");
+    const [historyType, setHistoryType] = useState<"review" | "contrast">("review");
+    const riskDataList = RiskStore((e) => e.riskDataList);
+    const isStreaming = RiskStore((e) => e.isStreaming);
+    const isCompleted = RiskStore((e) => e.isCompleted);
+    const sourceFileUrl = RiskStore((e) => e.sourceFileUrl);
+    const resetRiskData = RiskStore((e) => e.resetRiskData);
+    const data = UploadStore((e) => e.data);
+    const setData = UploadStore((e) => e.setData);
+    const router = useRouter();
+
+    const isReviewing = isStreaming || !isCompleted;
+
+    useEffect(() => {
+        if (typeof window !== "undefined") {
+            const currentData = UploadStore.getState().data;
+            const storedFileUrl = localStorage.getItem("uploaded_file_url");
+            const storedFileType = localStorage.getItem("uploaded_file_type");
+            const storedFileTitle = localStorage.getItem("uploaded_file_title");
+            const storedPartyA = localStorage.getItem("uploaded_party_a");
+            const storedPartyB = localStorage.getItem("uploaded_party_b");
+
+            const hasStoredFile = storedFileUrl || storedFileType || storedFileTitle;
+
+            if (
+                (!currentData || !currentData.file_url) &&
+                hasStoredFile
+            ) {
+                setData({
+                    file_url: storedFileUrl || undefined,
+                    file_type: storedFileType || undefined,
+                    title: storedFileTitle || undefined,
+                    party_a: storedPartyA || undefined,
+                    party_b: storedPartyB || undefined,
+                });
+            }
+        }
+    }, []);
+    const title = data?.title ?? "";
+    const file_type = data?.file_type ?? "docx";
+    const file_url = resolveFileUrl(data?.file_url);
+    const documentKey = useMemo(() => {
+        if (!file_url) return "";
+        let hash = 0;
+        for (let i = 0; i < file_url.length; i++) {
+            const char = file_url.charCodeAt(i);
+            hash = (hash << 5) - hash + char;
+            hash = hash & hash;
+        }
+        return `doc-${Math.abs(hash)}`;
+    }, [file_url]);
+
+    // 当文档 URL 变化时，检查是否需要清除旧的风险点数据
+    useEffect(() => {
+        if (file_url && sourceFileUrl && file_url !== sourceFileUrl) {
+            // 当前文档和风险点数据不匹配，清除旧数据
+            resetRiskData();
+        }
+    }, [file_url, sourceFileUrl, resetRiskData]);
+
+    // 仅用于控制 Canvas Editor 的挂载时机
+
+    useEffect(() => {
+        if (file_url && file_type) {
+            setShouldRenderEditor(false);
+            setEditorKey((prev) => prev + 1);
+
+            const timer = setTimeout(() => {
+                setShouldRenderEditor(true);
+            }, 100);
+
+            return () => clearTimeout(timer);
+        } else {
+            setShouldRenderEditor(false);
+        }
+    }, [file_url, file_type]);
+
+    useEffect(() => {
+        const lastTab = lastTabRef.current;
+        if (activeTab === "check" && lastTab !== "check" && file_url && file_type) {
+            setShouldRenderEditor(false);
+            setEditorKey((prev) => prev + 1);
+            const timer = setTimeout(() => {
+                setShouldRenderEditor(true);
+            }, 80);
+            lastTabRef.current = activeTab;
+            return () => clearTimeout(timer);
+        }
+        lastTabRef.current = activeTab;
+    }, [activeTab, file_url, file_type]);
+
+    useEffect(() => {
+        if (activeTab === "contrast") {
+            setHistoryType("contrast");
+        } else if (activeTab === "history") {
+            setHistoryType("review");
+        }
+    }, [activeTab]);
+
+    // 加载文档内容
+    useEffect(() => {
+        if (!file_url || !shouldRenderEditor) return;
+
+        const loadDocument = async () => {
+            setIsLoadingDocument(true);
+            setDocumentError(null); // 清除之前的错误
+            try {
+       
+                // const url = new URL(file_url);
+                // const path = url.pathname + url.search;
+                // const proxyPath = path.replace(/^\/api\/static/, '/api/proxy/static');
+                // const proxy_url = process.env.NEXT_SERVER_URL + proxyPath;
+                // console.log("代理地址为：",proxy_url)
+                console.log("原始文件路径：",file_url)
+                const proxyUrl = buildStaticFileUrl(file_url); 
+                const response=await fetch(proxyUrl)
+           
+                // const response = await fetch(file_url);
+                if (!response.ok) {
+                    throw new Error(
+                        `加载文档失败: ${response.status} ${response.statusText}`
+                    );
+                }
+
+                // 根据文件类型处理
+                let elementList: IElement[] = [];
+                const headerElementList: IElement[] = [];
+                const footerElementList: IElement[] = [];
+                let docxArrayBuffer: ArrayBuffer | null = null; // 用于存储 DOCX 文件的 arrayBuffer
+                docxArrayBuffer = await response.arrayBuffer();
+                elementList = [];
+                if (!elementList || elementList.length === 0) {
+                    elementList = [{value: "\n"}];
+                }
+
+                // 等待 DOM 容器准备好（在解析完成后再次检查）
+                let retryCount = 0;
+                const maxRetries = 20; // 增加重试次数
+                while (!canvasContainerRef.current && retryCount < maxRetries) {
+                    await new Promise((resolve) => setTimeout(resolve, 100));
+                    retryCount++;
+                }
+
+                if (!canvasContainerRef.current) {
+                    throw new Error("编辑器容器未准备好");
+                }
+
+                // 销毁已有实例
+                if (canvasEditorRef.current) {
+                    try {
+                        canvasEditorRef.current.destroy();
+                    } catch (e) {
+                    }
+                    canvasEditorRef.current = null;
+                }
+
+                // 创建新实例
+                const editorOptions: IEditorOption = {
+                    mode: EditorMode.EDIT,
+                    width: 794, // A4 宽度（像素）
+                    height: 1123, // A4 高度（像素）
+                    scale: 1,
+                    pageMode: PageMode.PAGING, // 分页模式，显示纸张布局
+                    pageGap: 20, // 页面之间的间隔
+                    margins: [100, 120, 100, 120], // 纸张内边距，分别为：上、右、下、左
+                    marginIndicatorSize: 35, // 纸张内边距指示器的大小，也就是四个直角的边长
+                    marginIndicatorColor: "#BABABA", // 纸张内边距指示器的颜色，也就是四个直角的边颜色
+                };
+
+                // 准备编辑器数据，如果有页眉页脚，使用 IEditorData 格式
+                let editorData: IEditorData | IElement[];
+                if (
+                    (headerElementList && headerElementList.length > 0) ||
+                    (footerElementList && footerElementList.length > 0)
+                ) {
+                    editorData = {
+                        main: elementList,
+                        header:
+                            headerElementList && headerElementList.length > 0
+                                ? headerElementList
+                                : undefined,
+                        footer:
+                            footerElementList && footerElementList.length > 0
+                                ? footerElementList
+                                : undefined,
+                    };
+                    // 启用页眉页脚
+                    editorOptions.header = {
+                        disabled: false,
+                    };
+                    editorOptions.footer = {
+                        disabled: false,
+                    };
+                } else {
+                    editorData = elementList;
+                }
+
+                if (docxArrayBuffer) {
+                    if (typeof window !== "undefined") {
+                        try {
+                            await Promise.all([
+                                import("@/lib/canvas-editor/plugins/docx/importDocx"),
+                                import("@/lib/canvas-editor/plugins/docx/exportDocx"),
+                            ]);
+
+                            const docxPluginModule = await import(
+                                "@/lib/canvas-editor/plugins/docx"
+                                );
+                            const docxPlugin = docxPluginModule.default;
+
+                            canvasEditorRef.current = new Editor(
+                                canvasContainerRef.current,
+                                editorData,
+                                editorOptions
+                            );
+
+                            canvasEditorRef.current.use(markdownPlugin);
+                            canvasEditorRef.current.use(docxPlugin);
+
+                            let retryCount = 0;
+                            const maxRetries = 50;
+                            while (
+                                !canvasEditorRef.current.command.executeImportDocx &&
+                                retryCount < maxRetries
+                                ) {
+                                await new Promise((resolve) => setTimeout(resolve, 50));
+                                retryCount++;
+                            }
+
+                            if (canvasEditorRef.current.command.executeImportDocx) {
+                                await canvasEditorRef.current.command.executeImportDocx({
+                                    arrayBuffer: docxArrayBuffer,
+                                });
+                            } else {
+                                throw new Error("DOCX 插件加载超时");
+                            }
+                        } catch (err) {
+                            console.error("[文档加载] DOCX 加载失败:", err);
+                            canvasEditorRef.current = new Editor(
+                                canvasContainerRef.current,
+                                editorData,
+                                editorOptions
+                            );
+                            canvasEditorRef.current.use(markdownPlugin);
+                            setDocumentError("DOCX 文件加载失败，请重试");
+                        }
+                    } else {
+                        canvasEditorRef.current = new Editor(
+                            canvasContainerRef.current,
+                            editorData,
+                            editorOptions
+                        );
+                        canvasEditorRef.current.use(markdownPlugin);
+                    }
+                } else {
+                    canvasEditorRef.current = new Editor(
+                        canvasContainerRef.current,
+                        editorData,
+                        editorOptions
+                    );
+
+                    if (canvasEditorRef.current) {
+                        canvasEditorRef.current.use(markdownPlugin);
+
+                        if (typeof window !== "undefined") {
+                            try {
+                                const docxPluginModule = await import(
+                                    "@/lib/canvas-editor/plugins/docx"
+                                    );
+                                const docxPlugin = docxPluginModule.default;
+                                canvasEditorRef.current.use(docxPlugin);
+                            } catch (err) {
+                                console.warn(
+                                    "[文档加载] DOCX 插件加载失败（导出功能可能不可用）:",
+                                    err
+                                );
+                            }
+                        }
+                    }
+                }
+                if (canvasContainerRef.current) {
+                    const editorContainer =
+                        canvasContainerRef.current.querySelector(
+                            ".ce-page-container"
+                        )?.parentElement;
+                    if (editorContainer) {
+                        editorContainer.style.margin = "0 auto";
+                        editorContainer.style.display = "flex";
+                        editorContainer.style.justifyContent = "center";
+                    }
+                }
+            } catch (error) {
+                if (error instanceof Error) {
+                    setDocumentError(error.message);
+                } else {
+                    setDocumentError("加载文档时发生未知错误");
+                }
+            } finally {
+                setIsLoadingDocument(false);
+            }
+        };
+
+        // 使用 setTimeout 确保 DOM 已渲染
+        const timer = setTimeout(() => {
+            loadDocument();
+        }, 100);
+
+        return () => {
+            clearTimeout(timer);
+            if (canvasEditorRef.current) {
+                try {
+                    canvasEditorRef.current.destroy();
+                } catch {
+                }
+                canvasEditorRef.current = null;
+            }
+        };
+    }, [file_url, file_type, shouldRenderEditor, editorKey]);
+
+    useEffect(() => {
+        const checkLoginStatus = async () => {
+            const token = localStorage.getItem("access_token");
+            if (token) {
+                try {
+                    const userInfo = await getUserInfo();
+                    setUser(userInfo);
+                } catch (error) {
+                    localStorage.removeItem("access_token");
+                    const apiError = error as ApiError;
+                    if (apiError.status === 401) {
+                        setLoginVisible(true);
+                    }
+                }
+            }
+        };
+        checkLoginStatus();
+    }, []);
+
+    // 接入编辑器监听：当编辑器实例可用时，实时同步状态到本地 editorState
+    useEditorListeners({
+        editor: canvasEditorRef.current,
+        onStateChange: (updates) => {
+            setEditorState((prev) => {
+                return {
+                    ...(prev || ({} as EditorStateType)),
+                    ...updates,
+                } as EditorStateType;
+            });
+        },
+    });
+
+    const handleLoginSuccess = async (token: string) => {
+        try {
+            const userInfo = await getUserInfo();
+            setUser(userInfo);
+            if (token) {
+                localStorage.setItem("access_token", token);
+            }
+        } catch (error) {
+            const apiError = error as ApiError;
+            if (apiError.status === 401) {
+                setLoginVisible(true);
+            }
+        }
+        setLoginVisible(false);
+        // 登录成功后刷新页面
+        window.location.reload();
+    };
+
+    const handleLoginClick = useCallback(() => {
+        setLoginVisible(true);
+    }, []);
+
+    // 注册登录回调，使 403/401 模态框可以触发登录模态框
+    useEffect(() => {
+        const unregister = authDatedHandler.registerLoginCallback(() => {
+            handleLoginClick();
+        });
+        return () => {
+            unregister();
+        };
+    }, [handleLoginClick]);
+
+    const handleSaveDocument = async () => {
+        if (!canvasEditorRef.current?.command) {
+            return;
+        }
+
+        // 等待 executeExportDocx 方法加载
+        let retryCount = 0;
+        const maxRetries = 100;
+        while (
+            !canvasEditorRef.current.command.executeExportDocx &&
+            retryCount < maxRetries
+            ) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            retryCount++;
+        }
+
+        if (!canvasEditorRef.current.command.executeExportDocx) {
+            // 尝试手动加载 docx 插件
+            try {
+                const docxPluginModule = await import(
+                    "@/lib/canvas-editor/plugins/docx"
+                    );
+                const docxPlugin = docxPluginModule.default;
+                canvasEditorRef.current.use(docxPlugin);
+
+                // 再次等待
+                retryCount = 0;
+                while (
+                    !canvasEditorRef.current.command.executeExportDocx &&
+                    retryCount < maxRetries
+                    ) {
+                    await new Promise((resolve) => setTimeout(resolve, 50));
+                    retryCount++;
+                }
+
+                if (!canvasEditorRef.current.command.executeExportDocx) {
+                    return;
+                }
+            } catch (err) {
+                return;
+            }
+        }
+
+        try {
+            const fileName = title || "合同文档";
+            const file = await canvasEditorRef.current.command.executeExportDocx({
+                fileName: fileName.replaceAll(".docx", "").replaceAll(".doc", ""),
+            });
+            const fd = new FormData();
+            fd.append("file", file);
+            await saveApi(fd);
+        } catch (error) {
+            console.error("导出失败:", error);
+        }
+    };
+
+    const renderSideContent = () => {
+        switch (activeTab) {
+            case "check":
+                return (
+                    <RiskCard
+                        riskDataList={riskDataList}
+                        editor={canvasEditorRef.current}
+                    />
+                );
+            case "contrast":
+                return (
+                    <div className="p-4 bg-gray-100 h-full text-gray-600">
+                        合同比对面板（待接入）
+                    </div>
+                );
+            default:
+                return (
+                    <RiskCard
+                        riskDataList={riskDataList}
+                        editor={canvasEditorRef.current}
+                    />
+                );
+        }
+    };
+
+    return (
+        <div className="flex flex-col h-screen overflow-hidden">
+            <Topbar
+                user={user}
+                onLoginClick={handleLoginClick}
+                onLogoutClick={() => {
+                    localStorage.removeItem("access_token");
+                    localStorage.removeItem("refresh_token");
+                    localStorage.removeItem("token_type");
+                    setUser(null);
+                }}
+                activeTab={activeTab}
+            />
+            <div
+                className="flex flex-row flex-1"
+                style={{paddingRight: activeTab === 'check' ? "35.13rem" : 0, overflow: "hidden"}}
+            >
+                {activeTab === 'databoard' ? (
+                    <div className="flex-1 w-full overflow-auto">
+                        <Signboard/>
+                    </div>
+                ) : activeTab === 'history' ? (
+                    <div className="flex-1 w-full overflow-auto bg-[#f3f4f6]">
+                        <div className="h-full rounded-[0.31rem] border border-[#e3e3e3] shadow-sm p-6 overflow-auto">
+                            {historyType === "review" ? (
+                                <ReviewHistory
+                                    type="Review"
+                                    onTypeChange={(type) => setHistoryType(type === "Review" ? "review" : "contrast")}
+                                    onViewRecord={() => setActiveTab("check")}
+                                />
+                            ) : (
+                                <ContrastHistory
+                                    type="Contrast"
+                                    onTypeChange={(type) => setHistoryType(type === "Contrast" ? "contrast" : "review")}
+                                />
+                            )}
+                        </div>
+                    </div>
+                ) : activeTab === 'contrast' ? (
+                    <div className="flex-1 overflow-hidden">
+                        <div className="h-full mt-[2.75rem] overflow-hidden">
+                            <ContractContrastPanel/>
+                        </div>
+                    </div>
+                ) : (
+                    <div
+                        className="flex-1 editor-area"
+                        style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            overflow: "hidden",
+                        }}
+                    >
+                        <div style={{zIndex: 10000, pointerEvents: isReviewing ? 'none' : 'auto'}}>
+                            <EditorToolbar
+                                editor={canvasEditorRef.current}
+                                onSave={handleSaveDocument}
+                            />
+                        </div>
+                        <div
+                            className="flex-1 w-full relative word-scroll-area"
+                            style={{overflow: "hidden", minHeight: 0, position: "relative"}}
+                        >
+                            {file_url && file_type && shouldRenderEditor ? (
+                                <>
+                                    <div
+                                        key={`${documentKey}-${editorKey}`}
+                                        id={`canvasEditor-${documentKey}-${editorKey}`}
+                                        ref={canvasContainerRef}
+                                        data-page-scale={editorState?.pageScale ?? ""}
+                                        data-page-no={editorState?.pageNo ?? ""}
+                                        data-word-count={editorState?.wordCount ?? ""}
+                                        style={{
+                                            width: "100%",
+                                            height: "100%",
+                                            display: "flex",
+                                            justifyContent: "center",
+                                            padding: "0",
+                                            backgroundColor: "#dedede",
+                                            pointerEvents: isReviewing ? 'none' : 'auto',
+                                        }}
+                                    />
+                                    {isLoadingDocument && (
+                                        <div
+                                            className="absolute inset-0 flex items-center justify-center bg-white bg-opacity-75 z-10">
+                                            <div className="text-center">
+                                                <p className="text-lg mb-2 text-gray-500">
+                                                    正在加载文档...
+                                                </p>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {documentError && !isLoadingDocument && (
+                                        <div
+                                            className="absolute inset-0 flex items-center justify-center bg-white bg-opacity-90 z-10">
+                                            <div className="text-center max-w-2xl mx-auto p-6">
+                                                <p className="text-xl mb-4 text-red-600 font-semibold">
+                                                    文档加载失败
+                                                </p>
+                                                <p className="text-base mb-4 text-gray-700 whitespace-pre-wrap">
+                                                    {documentError}
+                                                </p>
+                                                <Space>
+                                                    <Button
+                                                        type="primary"
+                                                        onClick={() => {
+                                                            setDocumentError(null);
+                                                            setEditorKey((prev) => prev + 1);
+                                                        }}
+                                                    >
+                                                        重试
+                                                    </Button>
+                                                    <Button
+                                                        type="primary"
+                                                        onClick={() => {
+                                                            router.push('/')
+                                                        }}
+                                                    >
+                                                        退出
+                                                    </Button>
+                                                </Space>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {isReviewing && !isLoadingDocument && !documentError && (
+                                        <div
+                                            className="absolute inset-0"
+                                            style={{
+                                                pointerEvents: 'all',
+                                                zIndex: 9999,
+                                                backgroundColor: 'rgba(0, 0, 0, 0.2)'
+                                            }}
+                                        />
+                                    )}
+                                </>
+                            ) : file_url && file_type ? (
+                                <div className="flex items-center justify-center h-full text-gray-500">
+                                    <div className="text-center">
+                                        <p className="text-lg mb-2">正在初始化编辑器...</p>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="flex items-center justify-center h-full text-gray-500">
+                                    <div className="text-center">
+                                        <p className="text-lg mb-2">
+                                            {!file_url ? "请先上传合同文档" : "文档类型未识别"}
+                                        </p>
+                                        {!file_url ? (
+                                            <Button
+                                                size="large"
+                                                onClick={() => router.push("/")}
+                                                type="primary"
+                                            >
+                                                返回上一页
+                                            </Button>
+                                        ) : (
+                                            ""
+                                        )}
+                                        <p className="text-sm text-gray-400">
+                                            {!file_url && "文件URL: " + (data?.file_url || "未设置")}
+                                            {file_url &&
+                                                !file_type &&
+                                                "文件类型: " + (data?.file_type || "未设置")}
+                                        </p>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            {activeTab === 'check' && (
+                <div
+                    className="bg-gray-100 flex flex-col h-full fixed right-0 top-16 bottom-0 z-[9999] pt-[4rem]"
+                    style={{width: "35.13rem", boxSizing: "border-box"}}
+                >
+                    <div className="flex-1 overflow-auto risk-scroll-area" style={{minHeight: 0}}>
+                        {renderSideContent()}
+                    </div>
+                </div>
+            )}
+
+            <LoginModal
+                visible={loginVisible}
+                onCancel={() => setLoginVisible(false)}
+                onSuccess={handleLoginSuccess}
+                onSwitchToRegister={() => {
+                }}
+            />
+        </div>
+    );
+}

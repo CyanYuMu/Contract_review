@@ -1,0 +1,111 @@
+@import "./control/select.css";
+@import "./date/datePicker.css";
+@import "./block/block.css";
+@import "./table/table.css";
+@import "./resizer/resizer.css";
+@import "./previewer/previewer.css";
+@import "./contextmenu/contextmenu.css";
+@import "./hyperlink/hyperlink.css";
+@import "./zone/zone.css";
+
+.ce-inputarea {
+  width: 100px;
+  height: 30px;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  left: 0;
+  top: 0;
+  letter-spacing: 0;
+  font-size: 12px;
+  position: absolute;
+  z-index: -1;
+  outline: none;
+  resize: none;
+  border: none;
+  overflow: hidden;
+  color: transparent;
+  user-select: none;
+  caret-color: transparent;
+  background-color: transparent;
+}
+
+.ce-cursor {
+  width: 1px;
+  height: 20px;
+  left: 0;
+  right: 0;
+  position: absolute;
+  outline: none;
+  background-color: #000000;
+  pointer-events: none;
+}
+
+.ce-cursor.ce-cursor--animation {
+  animation-duration: 1s;
+  animation-iteration-count: infinite;
+  animation-name: cursorAnimation;
+}
+
+@keyframes cursorAnimation {
+  from {
+    opacity: 1;
+  }
+
+  13% {
+    opacity: 0;
+  }
+
+  50% {
+    opacity: 0;
+  }
+
+  63% {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.ce-float-image {
+  position: absolute;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* 编辑器主容器样式 - 确保居中并可滚动，固定在可视区域 */
+[editor-component="main"] {
+  margin: 0 auto !important;
+  display: flex !important;
+  justify-content: center !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  height: 100% !important;
+  position: relative !important;
+  max-height: 100% !important;
+}
+
+/* 页面容器样式 */
+.ce-page-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 20px 20px 20px;
+  background-color: #dedede;
+  min-height: 100%;
+  width: 100%;
+  margin: 0 auto;
+  /* 确保容器可以根据内容扩展 */
+  flex-shrink: 0;
+}
+
+/* 页面 Canvas 样式 - 模拟 Word 纸张效果 */
+.ce-page-container canvas {
+  box-shadow: 0 2px 12px rgba(158, 161, 165, 0.4);
+  background-color: #ffffff;
+  cursor: text;
+  display: block;
+}

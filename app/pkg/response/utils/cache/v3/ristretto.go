@@ -1,0 +1,329 @@
+package cache
+
+import (
+	"context"
+	"time"
+
+	"github.com/dgraph-io/ristretto"
+)
+
+type RistrettoCache struct {
+	*Base
+	cache              *ristretto.Cache
+	disableAutoRefresh bool
+}
+
+// NewRistrettoCache creates a new RistrettoCache instance
+func NewRistrettoCache(cnf *RistrettoCacheConfig) GoCacheCmd {
+	dftCnf := DftRestrettoConfig()
+	dftCnf.Apply(cnf)
+
+	cache, err := ristretto.NewCache(&ristretto.Config{
+		NumCounters: dftCnf.NumCounters,
+		MaxCost:     dftCnf.MaxCost,
+		BufferItems: dftCnf.BufferItems,
+		Metrics:     dftCnf.EnableMetrics,
+	})
+	if err != nil {
+		panic(err) // 在构造函数中panic是合理的，因为配置错误应该在启动时发现
+	}
+	inst := &RistrettoCache{
+		Base:               &Base{},
+		cache:              cache,
+		disableAutoRefresh: dftCnf.DisableAutoRefresh,
+	}
+
+	return inst
+}
+
+func (r *RistrettoCache) Set(ctx context.Context, k string, v interface{}, ttl time.Duration, opt ...*StringSetOption) (ok bool, err error) {
+	k = r.GetKey(k)
+
+	if ttl > 0 {
+		ok = r.cache.SetWithTTL(k, v, 1, ttl)
+	} else {
+		ok = r.cache.Set(k, v, 1)
+	}
+
+	// Wait for the value to pass through buffers to ensure immediate consistency
+	if ok {
+		if !r.disableAutoRefresh {
+			r.cache.Wait()
+		}
+	}
+
+	return ok, nil
+}
+
+func (r *RistrettoCache) Get(ctx context.Context, k string) (val interface{}, err error) {
+	k = r.GetKey(k)
+	val, _ = r.cache.Get(k)
+	return val, nil
+}
+
+func (r *RistrettoCache) Del(ctx context.Context, k string) (ok bool, err error) {
+	k = r.GetKey(k)
+	r.cache.Del(k)
+	if !r.disableAutoRefresh {
+		// Wait to ensure deletion is processed immediately
+		r.cache.Wait()
+	}
+	return true, nil
+}
+
+func (r *RistrettoCache) Exists(ctx context.Context, k string) (exists bool, err error) {
+	k = r.GetKey(k)
+	_, exists = r.cache.Get(k)
+	return exists, nil
+}
+
+func (r *RistrettoCache) Expire(ctx context.Context, k string, ttl time.Duration) (ok bool, err error) {
+	k = r.GetKey(k)
+
+	// Get current value
+	v, exists := r.cache.Get(k)
+	if !exists {
+		return false, nil
+	}
+
+	// Reset with new TTL
+	if ttl > 0 {
+		ok = r.cache.SetWithTTL(k, v, 1, ttl)
+	} else {
+		ok = r.cache.Set(k, v, 1)
+	}
+
+	// Wait to ensure the update is processed immediately
+	if ok {
+		if !r.disableAutoRefresh {
+			r.cache.Wait()
+		}
+	}
+
+	return ok, nil
+}
+
+func (r *RistrettoCache) incrAutoFill(ctx context.Context, k string, n int64) (int64, error) {
+	k = r.GetKey(k)
+	ok := r.cache.Set(k, n, 1)
+	if ok {
+		if !r.disableAutoRefresh {
+			r.cache.Wait()
+		}
+		return n, nil
+	}
+	return 0, nil
+}
+
+func (r *RistrettoCache) Incr(ctx context.Context, k string) (n int64, err error) {
+	k = r.GetKey(k)
+
+	val, exists := r.cache.Get(k)
+	if !exists {
+		return r.incrAutoFill(ctx, k, 1)
+	}
+
+	// Convert to int64
+	var currentVal int64
+	switch v := val.(type) {
+	case int64:
+		currentVal = v
+	case int:
+		currentVal = int64(v)
+	case int32:
+		currentVal = int64(v)
+	default:
+		return r.incrAutoFill(ctx, k, 1)
+	}
+
+	newVal := currentVal + 1
+	ok := r.cache.Set(k, newVal, 1)
+	if ok {
+		if !r.disableAutoRefresh {
+			r.cache.Wait()
+		}
+		return newVal, nil
+	}
+
+	return currentVal, nil
+}
+
+func (r *RistrettoCache) IncrBy(ctx context.Context, k string, v int64) (n int64, err error) {
+	k = r.GetKey(k)
+
+	val, exists := r.cache.Get(k)
+	if !exists {
+		return r.incrAutoFill(ctx, k, v)
+	}
+
+	// Convert to int64
+	var currentVal int64
+	switch cv := val.(type) {
+	case int64:
+		currentVal = cv
+	case int:
+		currentVal = int64(cv)
+	case int32:
+		currentVal = int64(cv)
+	default:
+		return r.incrAutoFill(ctx, k, v)
+	}
+
+	newVal := currentVal + v
+	ok := r.cache.Set(k, newVal, 1)
+	if ok {
+		if !r.disableAutoRefresh {
+			r.cache.Wait()
+		}
+		return newVal, nil
+	}
+
+	return currentVal, nil
+}
+
+func (r *RistrettoCache) Decr(ctx context.Context, k string) (n int64, err error) {
+	k = r.GetKey(k)
+
+	val, exists := r.cache.Get(k)
+	if !exists {
+		return r.incrAutoFill(ctx, k, -1)
+	}
+
+	// Convert to int64
+	var currentVal int64
+	switch v := val.(type) {
+	case int64:
+		currentVal = v
+	case int:
+		currentVal = int64(v)
+	case int32:
+		currentVal = int64(v)
+	default:
+		return r.incrAutoFill(ctx, k, -1)
+	}
+
+	newVal := currentVal - 1
+	ok := r.cache.Set(k, newVal, 1)
+	if ok {
+		if !r.disableAutoRefresh {
+			r.cache.Wait()
+		}
+		return newVal, nil
+	}
+
+	return currentVal, nil
+}
+
+func (r *RistrettoCache) DecrBy(ctx context.Context, k string, v int64) (n int64, err error) {
+	k = r.GetKey(k)
+
+	val, exists := r.cache.Get(k)
+	if !exists {
+		return r.incrAutoFill(ctx, k, -v)
+	}
+
+	// Convert to int64
+	var currentVal int64
+	switch cv := val.(type) {
+	case int64:
+		currentVal = cv
+	case int:
+		currentVal = int64(cv)
+	case int32:
+		currentVal = int64(cv)
+	default:
+		return r.incrAutoFill(ctx, k, -v)
+	}
+
+	newVal := currentVal - v
+	ok := r.cache.Set(k, newVal, 1)
+	if ok {
+		if !r.disableAutoRefresh {
+			r.cache.Wait()
+		}
+		return newVal, nil
+	}
+
+	return currentVal, nil
+}
+
+func (r *RistrettoCache) TTL(ctx context.Context, k string) (ttl time.Duration, err error) {
+	// Note: Ristretto doesn't provide direct TTL inspection
+	// This is a limitation of the Ristretto library
+	// We can only check if the key exists
+	k = r.GetKey(k)
+	_, exists := r.cache.Get(k)
+	if !exists {
+		return -2, nil // Key doesn't exist
+	}
+
+	// Return -1 to indicate that TTL information is not available
+	// This is a known limitation when using Ristretto
+	return -1, nil
+}
+
+// RistrettoCacheConfig configuration for RistrettoCache
+type RistrettoCacheConfig struct {
+	// 用于保存频率信息的计数器数量（建议为期望缓存项数量的10倍左右）
+	NumCounters int64
+	// 缓存的最大消耗（以内存/大小单位计）
+	MaxCost int64
+	// 每个Get缓冲区的键数量（推荐64）
+	BufferItems int64
+	// 是否启用指标收集
+	EnableMetrics bool
+	// 关闭自动刷新
+	DisableAutoRefresh bool
+}
+
+// 默认配置是否合理分析：
+// - NumCounters: 1e7 (1000万) 计数器，适合大部分中大型服务，Ristretto 官方建议为缓存项数量的10倍。假设平均对象1KB，1GB可存约100万项，10倍即1000万，合理。
+// - MaxCost: 1 << 30 (1GB)，适合大部分服务，若业务量较小可适当调小。
+// - BufferItems: 64，官方推荐值，适合大多数场景。
+// - EnableMetrics: false，默认关闭性能监控，生产环境如需监控可开启。
+
+// 结论：默认配置对大部分中大型服务是合理的，若业务量较小或内存有限可适当调小 MaxCost 和 NumCounters。
+
+func (r *RistrettoCacheConfig) Apply(cnf *RistrettoCacheConfig) {
+	if cnf == nil {
+		return
+	}
+	// 只在用户有显式配置时才覆盖
+	if cnf.EnableMetrics {
+		r.EnableMetrics = cnf.EnableMetrics
+	}
+	if cnf.MaxCost > 0 {
+		r.MaxCost = cnf.MaxCost
+	}
+	if cnf.NumCounters > 0 {
+		r.NumCounters = cnf.NumCounters
+	}
+	if cnf.BufferItems > 0 {
+		r.BufferItems = cnf.BufferItems
+	}
+	// 若未配置NumCounters，按官方建议自动推算
+	if r.NumCounters == 0 {
+		// 10 × (MaxCost / avg_item_cost)，假设平均每项1KB
+		avgItemCost := int64(1000)
+		if r.MaxCost < avgItemCost {
+			r.NumCounters = 10000 // 最小兜底
+		} else {
+			r.NumCounters = int64(r.MaxCost/avgItemCost) * 10
+		}
+	}
+}
+
+func DftRestrettoConfig() *RistrettoCacheConfig {
+	return &RistrettoCacheConfig{
+		NumCounters:        1e7,     // 1000万计数器，适合1GB缓存和1KB对象
+		MaxCost:            1 << 30, // 1GB最大成本
+		BufferItems:        64,      // 官方推荐
+		EnableMetrics:      false,   // 默认关闭
+		DisableAutoRefresh: false,   // 默认自动刷新
+	}
+}
+
+// Close closes the cache instance (call this when shutting down)
+func (r *RistrettoCache) Close() {
+	r.cache.Close()
+}
