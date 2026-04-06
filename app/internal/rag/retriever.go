@@ -1,12 +1,10 @@
 package rag
 
 import (
-	"contract_review/app/internal/global"
+	"log"
 	"math"
 	"sort"
 	"strings"
-
-	"go.uber.org/zap"
 )
 
 // RAGRetriever 混合检索器
@@ -35,11 +33,11 @@ func (r *RAGRetriever) Retrieve(query string, filters map[string]string) ([]Sear
 	if r.vectorStore != nil && r.embedder != nil {
 		embedding, err := r.embedder.Embed(query)
 		if err != nil {
-			global.Log.Warn("向量 Embedding 失败，跳过向量检索", zap.Error(err))
+			log.Printf("rag: 向量 Embedding 失败，跳过向量检索: %v", err)
 		} else {
 			vr, err := r.vectorStore.Search(embedding, r.config.TopK, filters)
 			if err != nil {
-				global.Log.Warn("向量检索失败", zap.Error(err))
+				log.Printf("rag: 向量检索失败: %v", err)
 			} else {
 				vectorResults = vr
 			}
@@ -49,7 +47,7 @@ func (r *RAGRetriever) Retrieve(query string, filters map[string]string) ([]Sear
 	if r.keywordIndex != nil {
 		kr, err := r.keywordIndex.Search(query, r.config.TopK, filters)
 		if err != nil {
-			global.Log.Warn("关键词检索失败", zap.Error(err))
+			log.Printf("rag: 关键词检索失败: %v", err)
 		} else {
 			keywordResults = kr
 		}

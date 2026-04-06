@@ -30,8 +30,8 @@ type ReviewService struct {
 	cache            *redis.RedisClient
 	llm              *arkbot.ChatModel
 	orchestrator     *agent.ReviewOrchestrator // Agent 编排器
-	basePrompt       string                   // 基础审阅提示词
-	contractPrompts  map[string]string        // 不同合同类型的提示词
+	basePrompt       string                    // 基础审阅提示词
+	contractPrompts  map[string]string         // 不同合同类型的提示词
 }
 
 // NewReviewService 创建审阅服务
@@ -604,6 +604,27 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 
 	keywordIndex := rag.NewSimpleKeywordIndex()
 	retrieverConfig := rag.DefaultRetrieverConfig()
+	// 仅关键词通道时，默认 MinRelevance=0.5 易过滤部分命中，略调低以便召回
+	retrieverConfig.MinRelevance = 0.12
+
+	if global.DB != nil {
+		chunks, loadErr := rag.LoadKnowledgeChunksFromDB(ctx, global.DB)
+		if loadErr != nil {
+			global.Log.Warn("加载审阅知识库失败，rag_search 将无检索结果", zap.Error(loadErr))
+		} else if len(chunks) > 0 {
+			if err := keywordIndex.Index(chunks); err != nil {
+				global.Log.Warn("审阅知识库入索引失败", zap.Error(err))
+			} else {
+				global.Log.Info("审阅知识库已加载到关键词索引", zap.Int("chunks", len(chunks)))
+			}
+		} else {
+			global.Log.Warn("审阅知识库无已索引分块：请在库表 review_knowledge_* 写入数据并置 status=indexed，或执行 docs/sql/review_knowledge.sql")
+		}
+	} else {
+		global.Log.Warn("global.DB 未初始化，跳过审阅知识库加载")
+	}
+
+	// 向量检索需配置 VectorStore + EmbeddingModel（如 Milvus）；当前为 nil 时仅走关键词索引
 	ragRetriever := rag.NewRAGRetriever(nil, keywordIndex, nil, retrieverConfig)
 
 	ragSearchTool := tools.NewRAGSearchTool(ragRetriever)
