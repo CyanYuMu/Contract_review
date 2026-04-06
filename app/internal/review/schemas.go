@@ -99,6 +99,8 @@ type ReviewSSEMessageData struct {
 	SuggestedContent string `json:"suggested_content"` // 建议内容
 	Reason           string `json:"reason"`            // 修改理由
 	RiskType         string `json:"risk_type"`         // 风险类型
+	IsAccepted       bool   `json:"is_accepted"`       // 是否已采纳
+	CreatedAt        string `json:"created_at"`        // 创建时间
 }
 
 // ReviewSSEErrorData SSE错误数据

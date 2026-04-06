@@ -5,7 +5,6 @@ import (
 	"contract_review/app/internal/contract"
 	"contract_review/app/internal/global"
 	"contract_review/app/internal/middleware/redis"
-	"contract_review/app/internal/session"
 	"contract_review/app/pkg/utils"
 	"encoding/json"
 	"errors"
@@ -14,13 +13,14 @@ import (
 	"strings"
 
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // ComparisonService 比对服务
 type ComparisonService struct {
 	comparisonRepo *ComparisonRepo
 	contractRepo   *contract.ContractRepo
-	sessionRepo    *session.SessionRepo
+	db             *gorm.DB
 	cache          *redis.RedisClient
 }
 
@@ -28,13 +28,13 @@ type ComparisonService struct {
 func NewComparisonService(
 	comparisonRepo *ComparisonRepo,
 	contractRepo *contract.ContractRepo,
-	sessionRepo *session.SessionRepo,
+	db *gorm.DB,
 	cache *redis.RedisClient,
 ) *ComparisonService {
 	return &ComparisonService{
 		comparisonRepo: comparisonRepo,
 		contractRepo:   contractRepo,
-		sessionRepo:    sessionRepo,
+		db:             db,
 		cache:          cache,
 	}
 }
@@ -128,40 +128,40 @@ func (s *ComparisonService) StartComparison(ctx context.Context, userID uint64, 
 // ensureComparisonSession 确保或创建比对会话
 func (s *ComparisonService) ensureComparisonSession(ctx context.Context, userID, sessionID uint64, title, stdTitle, cmpTitle string) (uint64, error) {
 	if sessionID > 0 {
-		// 验证现有会话
-		sess, err := s.sessionRepo.GetByID(ctx, uint(sessionID))
-		if err != nil {
+		var sess struct {
+			ID          uint64 `gorm:"column:id"`
+			UserID      uint64 `gorm:"column:user_id"`
+			SessionType string `gorm:"column:session_type"`
+		}
+		if err := s.db.WithContext(ctx).Table("sessions").Where("id = ?", sessionID).First(&sess).Error; err != nil {
 			return 0, fmt.Errorf("获取会话失败: %w", err)
 		}
-		if sess == nil {
-			return 0, fmt.Errorf("会话不存在")
-		}
-		if sess.UserID != uint(userID) {
+		if sess.UserID != userID {
 			return 0, fmt.Errorf("无权限访问此会话")
 		}
 		if sess.SessionType != "comparison" {
 			return 0, fmt.Errorf("会话类型必须为comparison")
 		}
-		return uint64(sess.ID), nil
+		return sess.ID, nil
 	}
 
-	// 创建新会话
 	sessionTitle := title
 	if sessionTitle == "" {
 		sessionTitle = fmt.Sprintf("%s VS %s", stdTitle, cmpTitle)
 	}
 
-	sess := &session.Session{
-		UserID:      uint(userID),
-		Title:       sessionTitle,
-		SessionType: "comparison",
+	type sessionRow struct {
+		ID          uint64 `gorm:"primaryKey;autoIncrement"`
+		UserID      uint64
+		Title       string
+		SessionType string
 	}
-
-	if err := s.sessionRepo.Create(ctx, sess); err != nil {
+	newSess := sessionRow{UserID: userID, Title: sessionTitle, SessionType: "comparison"}
+	if err := s.db.WithContext(ctx).Table("sessions").Create(&newSess).Error; err != nil {
 		return 0, fmt.Errorf("创建会话失败: %w", err)
 	}
 
-	return uint64(sess.ID), nil
+	return newSess.ID, nil
 }
 
 // compareDocuments 比对两个文档
@@ -185,7 +185,7 @@ func (s *ComparisonService) compareDocuments(stdPath, cmpPath string) (*DiffResu
 		zap.Int("cmpParagraphs", len(cmpLines)))
 
 	// 执行比对
-	diffResult := utils.DiffDocuments(stdLines, cmpLines)
+	diffResult := DiffDocuments(stdLines, cmpLines)
 
 	return &diffResult, nil
 }

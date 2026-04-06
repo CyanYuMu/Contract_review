@@ -2,44 +2,37 @@ package session
 
 import (
 	"context"
-	"contract_review/app/internal/comparison"
 	"contract_review/app/internal/contract"
 	"contract_review/app/internal/global"
 	"contract_review/app/internal/middleware/redis"
-	"contract_review/app/internal/review"
 	"encoding/json"
 	"errors"
 	"fmt"
 
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // SessionService 会话服务
 type SessionService struct {
-	sessionRepo      *SessionRepo
-	contractRepo     *contract.ContractRepo
-	reviewRepo       *review.ReviewRepo
-	reviewResultRepo *review.ReviewResultRepo
-	comparisonRepo   *comparison.ComparisonRepo
-	cache            *redis.RedisClient
+	sessionRepo  *SessionRepo
+	contractRepo *contract.ContractRepo
+	db           *gorm.DB
+	cache        *redis.RedisClient
 }
 
 // NewSessionService 创建会话服务
 func NewSessionService(
 	sessionRepo *SessionRepo,
 	contractRepo *contract.ContractRepo,
-	reviewRepo *review.ReviewRepo,
-	reviewResultRepo *review.ReviewResultRepo,
-	comparisonRepo *comparison.ComparisonRepo,
+	db *gorm.DB,
 	cache *redis.RedisClient,
 ) *SessionService {
 	return &SessionService{
-		sessionRepo:      sessionRepo,
-		contractRepo:     contractRepo,
-		reviewRepo:       reviewRepo,
-		reviewResultRepo: reviewResultRepo,
-		comparisonRepo:   comparisonRepo,
-		cache:            cache,
+		sessionRepo:  sessionRepo,
+		contractRepo: contractRepo,
+		db:           db,
+		cache:        cache,
 	}
 }
 
@@ -191,8 +184,7 @@ func (s *SessionService) DeleteSession(ctx context.Context, userID, sessionID ui
 			global.Log.Warn("删除审阅关联数据失败", zap.Error(err))
 		}
 	case SessionTypeCompare:
-		// 删除关联的比对任务
-		if err := s.comparisonRepo.DeleteBySessionID(ctx, uint64(session.ID)); err != nil {
+		if err := s.db.WithContext(ctx).Exec("DELETE FROM comparison_tasks WHERE session_id = ?", session.ID).Error; err != nil {
 			global.Log.Warn("删除比对关联数据失败", zap.Error(err))
 		}
 	}
@@ -202,20 +194,12 @@ func (s *SessionService) DeleteSession(ctx context.Context, userID, sessionID ui
 
 // deleteReviewRelatedData 删除审阅关联数据
 func (s *SessionService) deleteReviewRelatedData(ctx context.Context, sessionID uint) error {
-	// 获取审阅任务
-	task, err := s.reviewRepo.GetBySessionID(ctx, uint64(sessionID))
-	if err != nil {
+	sid := uint64(sessionID)
+	if err := s.db.WithContext(ctx).Exec("DELETE FROM review_results WHERE session_id = ?", sid).Error; err != nil {
 		return err
 	}
-	if task != nil {
-		// 删除审阅结果
-		if err := s.reviewResultRepo.DeleteBySessionID(ctx, uint64(sessionID)); err != nil {
-			return err
-		}
-		// 删除审阅任务
-		if err := s.reviewRepo.Delete(ctx, task.ID); err != nil {
-			return err
-		}
+	if err := s.db.WithContext(ctx).Exec("DELETE FROM review_tasks WHERE session_id = ?", sid).Error; err != nil {
+		return err
 	}
 	return nil
 }
@@ -257,21 +241,35 @@ func (s *SessionService) GetSessionHistoryDetail(ctx context.Context, sessionID 
 
 // getReviewHistoryData 获取审阅历史数据
 func (s *SessionService) getReviewHistoryData(ctx context.Context, sess *Session) ([]map[string]interface{}, error) {
-	task, err := s.reviewRepo.GetBySessionID(ctx, uint64(sess.ID))
-	if err != nil {
+	var count int64
+	if err := s.db.WithContext(ctx).Table("review_tasks").Where("session_id = ?", sess.ID).Count(&count).Error; err != nil {
 		return nil, err
 	}
-	if task == nil {
+	if count == 0 {
 		return nil, errors.New("审阅任务不存在")
 	}
 
-	results, err := s.reviewResultRepo.GetBySessionID(ctx, uint64(sess.ID))
-	if err != nil {
+	type reviewResultRow struct {
+		ID               uint64 `gorm:"column:id"`
+		SessionID        uint64 `gorm:"column:session_id"`
+		TaskID           uint64 `gorm:"column:task_id"`
+		Index            int    `gorm:"column:index"`
+		OriginalContent  string `gorm:"column:original_content"`
+		RiskAnalysis     string `gorm:"column:risk_analysis"`
+		RiskLevel        string `gorm:"column:risk_level"`
+		SuggestedContent string `gorm:"column:suggested_content"`
+		Reason           string `gorm:"column:reason"`
+		RiskType         string `gorm:"column:risk_type"`
+		CreatedAt        string `gorm:"column:created_at"`
+	}
+	var rows []reviewResultRow
+	if err := s.db.WithContext(ctx).Table("review_results").
+		Where("session_id = ?", sess.ID).Order("id ASC").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 
 	var data []map[string]interface{}
-	for _, r := range results {
+	for _, r := range rows {
 		data = append(data, map[string]interface{}{
 			"id":                r.ID,
 			"session_id":        r.SessionID,
@@ -283,37 +281,38 @@ func (s *SessionService) getReviewHistoryData(ctx context.Context, sess *Session
 			"suggested_content": r.SuggestedContent,
 			"reason":            r.Reason,
 			"risk_type":         r.RiskType,
-			"created_at":        r.CreatedAt.Format("2006-01-02 15:04:05"),
+			"created_at":        r.CreatedAt,
 		})
 	}
-
 	return data, nil
 }
 
 // getCompareHistoryData 获取比对历史数据
 func (s *SessionService) getCompareHistoryData(ctx context.Context, sess *Session) (map[string]interface{}, error) {
-	task, err := s.comparisonRepo.GetBySessionID(ctx, uint64(sess.ID))
-	if err != nil {
-		return nil, err
+	type compTaskRow struct {
+		ID               uint64  `gorm:"column:id"`
+		StandardFileID   uint64  `gorm:"column:standard_file_id"`
+		ComparisonFileID uint64  `gorm:"column:comparison_file_id"`
+		Similarity       float64 `gorm:"column:similarity"`
+		DiffSummary      string  `gorm:"column:diff_summary"`
+		DiffResult       string  `gorm:"column:diff_result"`
 	}
-	if task == nil {
+	var task compTaskRow
+	if err := s.db.WithContext(ctx).Table("comparison_tasks").
+		Where("session_id = ?", sess.ID).First(&task).Error; err != nil {
 		return nil, errors.New("比对任务不存在")
 	}
 
-	// 获取文件信息
 	stdFile, _ := s.contractRepo.GetContractByID(ctx, task.StandardFileID)
 	cmpFile, _ := s.contractRepo.GetContractByID(ctx, task.ComparisonFileID)
 
-	// 解析比对结果
 	var summary map[string]interface{}
 	var diffs []interface{}
-
 	if task.DiffSummary != "" {
 		if err := json.Unmarshal([]byte(task.DiffSummary), &summary); err != nil {
 			global.Log.Warn("解析比对摘要失败", zap.Error(err))
 		}
 	}
-
 	if task.DiffResult != "" {
 		if err := json.Unmarshal([]byte(task.DiffResult), &diffs); err != nil {
 			global.Log.Warn("解析比对结果失败", zap.Error(err))
@@ -328,7 +327,6 @@ func (s *SessionService) getCompareHistoryData(ctx context.Context, sess *Sessio
 		"diffs":        diffs,
 	}
 
-	// 添加文件信息
 	if stdFile != nil {
 		result["standard_file"] = map[string]interface{}{
 			"file_id":      stdFile.ID,
@@ -338,7 +336,6 @@ func (s *SessionService) getCompareHistoryData(ctx context.Context, sess *Sessio
 			"download_url": fmt.Sprintf("/api/contract/download/%d", stdFile.ID),
 		}
 	}
-
 	if cmpFile != nil {
 		result["comparison_file"] = map[string]interface{}{
 			"file_id":      cmpFile.ID,

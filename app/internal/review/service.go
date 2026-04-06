@@ -6,7 +6,6 @@ import (
 	"contract_review/app/internal/global"
 	"contract_review/app/internal/middleware/redis"
 	"contract_review/app/internal/rag"
-	"contract_review/app/internal/session"
 	"contract_review/app/internal/tools"
 	"fmt"
 	"os"
@@ -20,31 +19,37 @@ import (
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
+
+// SessionQuerier 查询会话的最小接口，避免 review ↔ session 循环引用
+type SessionQuerier interface {
+	SessionExists(ctx context.Context, sessionID uint64) (fileID uint64, err error)
+}
 
 // ReviewService 审阅服务
 type ReviewService struct {
 	reviewRepo       *ReviewRepo
 	reviewResultRepo *ReviewResultRepo
-	sessionRepo      *session.SessionRepo
+	db               *gorm.DB
 	cache            *redis.RedisClient
 	llm              *arkbot.ChatModel
-	orchestrator     *agent.ReviewOrchestrator // Agent 编排器
-	basePrompt       string                    // 基础审阅提示词
-	contractPrompts  map[string]string         // 不同合同类型的提示词
+	orchestrator     *agent.ReviewOrchestrator
+	basePrompt       string
+	contractPrompts  map[string]string
 }
 
 // NewReviewService 创建审阅服务
 func NewReviewService(
 	reviewRepo *ReviewRepo,
 	reviewResultRepo *ReviewResultRepo,
-	sessionRepo *session.SessionRepo,
+	db *gorm.DB,
 	cache *redis.RedisClient,
 ) *ReviewService {
 	return &ReviewService{
 		reviewRepo:       reviewRepo,
 		reviewResultRepo: reviewResultRepo,
-		sessionRepo:      sessionRepo,
+		db:               db,
 		cache:            cache,
 		contractPrompts:  make(map[string]string),
 	}
@@ -107,13 +112,14 @@ func (s *ReviewService) loadPromptTemplates() error {
 
 // CreateReviewTask 创建审阅任务
 func (s *ReviewService) CreateReviewTask(ctx context.Context, userID uint64, req *CreateReviewTaskRequest) (*ReviewTask, error) {
-	// 获取Session信息
-	sessionInfo, err := s.sessionRepo.GetByID(ctx, uint(req.SessionID))
-	if err != nil {
-		return nil, fmt.Errorf("获取会话信息失败: %w", err)
+	// 验证会话存在并获取 FileID
+	var sessRecord struct {
+		ID     uint64 `gorm:"column:id"`
+		FileID uint64 `gorm:"column:file_id"`
 	}
-	if sessionInfo == nil {
-		return nil, fmt.Errorf("会话不存在")
+	if err := s.db.WithContext(ctx).Table("sessions").
+		Where("id = ?", req.SessionID).First(&sessRecord).Error; err != nil {
+		return nil, fmt.Errorf("获取会话信息失败: %w", err)
 	}
 
 	// 检查是否已存在任务，存在则删除旧任务
@@ -134,7 +140,7 @@ func (s *ReviewService) CreateReviewTask(ctx context.Context, userID uint64, req
 	// 创建新任务
 	task := &ReviewTask{
 		SessionID:    req.SessionID,
-		FileID:       uint64(sessionInfo.FileID),
+		FileID:       sessRecord.FileID,
 		UserID:       userID,
 		Stance:       req.Stance,
 		Intensity:    req.Intensity,

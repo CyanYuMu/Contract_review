@@ -2,22 +2,22 @@ package redis
 
 import (
 	"context"
-	"contract_review/app/internal/global"
 	"crypto/rand"
 	"encoding/hex"
-	redis "github.com/redis/go-redis/v9"
 	"time"
+
+	redis "github.com/redis/go-redis/v9"
 )
 
 type RedisClient struct {
 	rdb *redis.Client
 }
 
-func NewRedisClient() *RedisClient {
+func NewRedisClient(addr, password string, db int) *RedisClient {
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     global.Config.Redis.Host + ":" + global.Config.Redis.Port,
-		Password: global.Config.Redis.Password,
-		DB:       global.Config.Redis.DB,
+		Addr:     addr,
+		Password: password,
+		DB:       db,
 	})
 	return &RedisClient{rdb: rdb}
 }

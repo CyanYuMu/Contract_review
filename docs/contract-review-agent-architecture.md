@@ -18,14 +18,16 @@
 
 **核心问题：**
 
-| 问题 | 现状 | 影响 |
-|------|------|------|
-| 无知识检索 | 风险点凭 LLM 自有知识"编造"，无法律法规依据 | 审阅结果不可信、不可追溯 |
-| 无 Agent 自主性 | 每个分块独立调一次 LLM，无思考-行动-观察循环 | 无法根据上下文动态调整审阅策略 |
-| 无质量反思 | LLM 输出直接使用，无评估与迭代 | 输出质量不稳定，存在遗漏和误判 |
-| 分块割裂 | 按固定字数暴力切割，忽视合同条款边界 | 跨块条款被截断，上下文丢失 |
-| Prompt 未接 DB | 代码中有三级 Prompt 模型但审阅未接入 | 无法按机构/个人定制审阅规则 |
-| 无工具调用 | LLM 不具备主动检索审阅规范的能力 | 风险点缺乏法规条例支撑 |
+
+| 问题           | 现状                        | 影响              |
+| ------------ | ------------------------- | --------------- |
+| 无知识检索        | 风险点凭 LLM 自有知识"编造"，无法律法规依据 | 审阅结果不可信、不可追溯    |
+| 无 Agent 自主性  | 每个分块独立调一次 LLM，无思考-行动-观察循环 | 无法根据上下文动态调整审阅策略 |
+| 无质量反思        | LLM 输出直接使用，无评估与迭代         | 输出质量不稳定，存在遗漏和误判 |
+| 分块割裂         | 按固定字数暴力切割，忽视合同条款边界        | 跨块条款被截断，上下文丢失   |
+| Prompt 未接 DB | 代码中有三级 Prompt 模型但审阅未接入    | 无法按机构/个人定制审阅规则  |
+| 无工具调用        | LLM 不具备主动检索审阅规范的能力        | 风险点缺乏法规条例支撑     |
+
 
 ### 1.2 目标架构等级
 
@@ -79,13 +81,15 @@
 
 **模式优先，框架其次**。本方案采用以下 Agent 设计模式的组合：
 
-| 模式 | 应用场景 | 对应书中章节 |
-|------|---------|-------------|
-| **ReAct** | 每个 Worker Agent 的思考-行动-观察循环 | 第 2 章 |
-| **Planning** | Orchestrator 对合同审阅任务的分解与编排 | 第 10 章 |
-| **Reflection** | 审阅结果的质量评估与迭代改进 | 第 11 章 |
-| **Supervisor** | 主 Agent 监督和协调多个 Worker Agent | 第 13-15 章 |
-| **Tool Calling** | Agent 调用 RAG 检索、规则验证等工具 | 第 3 章 |
+
+| 模式               | 应用场景                         | 对应书中章节    |
+| ---------------- | ---------------------------- | --------- |
+| **ReAct**        | 每个 Worker Agent 的思考-行动-观察循环  | 第 2 章     |
+| **Planning**     | Orchestrator 对合同审阅任务的分解与编排   | 第 10 章    |
+| **Reflection**   | 审阅结果的质量评估与迭代改进               | 第 11 章    |
+| **Supervisor**   | 主 Agent 监督和协调多个 Worker Agent | 第 13-15 章 |
+| **Tool Calling** | Agent 调用 RAG 检索、规则验证等工具      | 第 3 章     |
+
 
 ---
 
@@ -120,6 +124,7 @@ type OrchestratorConfig struct {
 ```
 
 **职责：**
+
 1. 接收审阅任务，解析合同元信息（类型、甲方/乙方、合同金额等）
 2. 根据合同类型从 PromptManager 加载对应的审阅规则
 3. 调用 ClauseAgent 进行智能条款拆分
@@ -157,6 +162,7 @@ type Clause struct {
 ```
 
 **ReAct 循环示例：**
+
 ```
 [第 1 轮]
 思考：需要先识别合同的整体结构，找到所有一级标题
@@ -260,6 +266,7 @@ type Suggestion struct {
 ```
 
 **ReAct 循环：**
+
 ```
 [第 1 轮]
 思考：收到风险发现 — 单方解约条款权利不对等。需要检索类似条款的标准表述
@@ -305,15 +312,18 @@ type QualityEvaluation struct {
 
 **评估维度：**
 
-| 维度 | 说明 | 权重 |
-|------|------|------|
-| completeness | 是否覆盖所有条款类别的审阅 | 0.25 |
-| legal_accuracy | 法律依据是否准确、是否经过RAG验证 | 0.30 |
-| risk_coverage | 高中低风险覆盖是否合理 | 0.20 |
-| suggestion_quality | 修改建议是否具体可行 | 0.15 |
-| consistency | 审阅风格和术语是否一致 | 0.10 |
+
+| 维度                 | 说明                 | 权重   |
+| ------------------ | ------------------ | ---- |
+| completeness       | 是否覆盖所有条款类别的审阅      | 0.25 |
+| legal_accuracy     | 法律依据是否准确、是否经过RAG验证 | 0.30 |
+| risk_coverage      | 高中低风险覆盖是否合理        | 0.20 |
+| suggestion_quality | 修改建议是否具体可行         | 0.15 |
+| consistency        | 审阅风格和术语是否一致        | 0.10 |
+
 
 **确定性护栏（硬规则）：**
+
 ```go
 func (qg *QualityGate) applyGuardrails(eval *QualityEvaluation, report *ReviewReport) {
     // 规则 1: 没有任何高风险发现但声称覆盖完整 → 降低置信度
@@ -400,6 +410,7 @@ type Chunk struct {
 ```
 
 **文档处理流程：**
+
 ```
 原始文档(PDF/DOCX/TXT)
     ↓
@@ -909,23 +920,27 @@ type ToolResult struct {
 
 ### 10.1 向量数据库选型
 
-| 方案 | 优势 | 劣势 | 推荐场景 |
-|------|------|------|---------|
-| **Milvus** | 分布式、高性能、Go SDK 成熟 | 部署复杂 | 生产环境 |
-| **Weaviate** | 内置混合检索、REST API | Go 生态较弱 | 快速原型 |
-| **Qdrant** | Rust 实现、性能好、Go client | 社区较小 | 性能敏感 |
-| **Chroma** | 简单易用、Python 生态 | 非生产级 | 开发测试 |
+
+| 方案           | 优势                    | 劣势      | 推荐场景 |
+| ------------ | --------------------- | ------- | ---- |
+| **Milvus**   | 分布式、高性能、Go SDK 成熟     | 部署复杂    | 生产环境 |
+| **Weaviate** | 内置混合检索、REST API       | Go 生态较弱 | 快速原型 |
+| **Qdrant**   | Rust 实现、性能好、Go client | 社区较小    | 性能敏感 |
+| **Chroma**   | 简单易用、Python 生态        | 非生产级    | 开发测试 |
+
 
 **推荐：Milvus**（与 Go 技术栈匹配，支持分布式扩展，有成熟的 Go SDK）
 
 ### 10.2 Embedding 模型
 
-| 模型 | 维度 | 中文支持 | 推荐用途 |
-|------|------|---------|---------|
-| text-embedding-3-small | 1536 | 良好 | 通用场景 |
-| text-embedding-3-large | 3072 | 良好 | 高精度 |
-| BAAI/bge-large-zh-v1.5 | 1024 | 优秀 | 中文法律文档 |
-| 智谱 embedding-3 | 2048 | 优秀 | 国产替代 |
+
+| 模型                     | 维度   | 中文支持 | 推荐用途   |
+| ---------------------- | ---- | ---- | ------ |
+| text-embedding-3-small | 1536 | 良好   | 通用场景   |
+| text-embedding-3-large | 3072 | 良好   | 高精度    |
+| BAAI/bge-large-zh-v1.5 | 1024 | 优秀   | 中文法律文档 |
+| 智谱 embedding-3         | 2048 | 优秀   | 国产替代   |
+
 
 **推荐：BAAI/bge-large-zh-v1.5**（中文法律领域效果最佳）或**智谱 embedding-3**（兼容国内部署）
 
@@ -943,56 +958,58 @@ github.com/milvus-io/milvus-sdk-go/v2  # Milvus Go SDK
 
 ### Phase 1: RAG 基础设施（预计 3-5 天）
 
-- [ ] 搭建 Milvus 或选用向量数据库
-- [ ] 实现 `rag/` 包：Embedder、VectorStore、Retriever
-- [ ] 实现知识库文档处理 Pipeline
-- [ ] 导入首批审阅规范和法律法规文档
-- [ ] 实现知识库管理 API（上传、索引、查询）
+- 搭建 Milvus 或选用向量数据库
+- 实现 `rag/` 包：Embedder、VectorStore、Retriever
+- 实现知识库文档处理 Pipeline
+- 导入首批审阅规范和法律法规文档
+- 实现知识库管理 API（上传、索引、查询）
 
 ### Phase 2: Agent 核心框架（预计 3-5 天）
 
-- [ ] 实现 `agent/react_loop.go` — ReAct 循环通用框架
-- [ ] 实现 `agent/agent_types.go` — Agent 和 Tool 接口
-- [ ] 实现 `tools/` 包 — RAG 检索工具、规则验证工具
-- [ ] 编写各 Agent 的 Prompt 模板
+- 实现 `agent/react_loop.go` — ReAct 循环通用框架
+- 实现 `agent/agent_types.go` — Agent 和 Tool 接口
+- 实现 `tools/` 包 — RAG 检索工具、规则验证工具
+- 编写各 Agent 的 Prompt 模板
 
 ### Phase 3: Worker Agent 实现（预计 5-7 天）
 
-- [ ] 实现 ClauseAgent — 智能条款拆分
-- [ ] 实现 RiskAgent — 风险识别与 RAG 验证
-- [ ] 实现 SuggestionAgent — 修改建议生成
-- [ ] 实现 RuleVerifier — 风险验证工具
+- 实现 ClauseAgent — 智能条款拆分
+- 实现 RiskAgent — 风险识别与 RAG 验证
+- 实现 SuggestionAgent — 修改建议生成
+- 实现 RuleVerifier — 风险验证工具
 
 ### Phase 4: 编排与质量控制（预计 3-5 天）
 
-- [ ] 实现 ReviewOrchestrator — 主 Agent / Supervisor
-- [ ] 实现 QualityGate — Reflection 质量评估
-- [ ] 实现 DAG 工作流编排（Phase1-6）
-- [ ] 接入三级 Prompt 管理系统
+- 实现 ReviewOrchestrator — 主 Agent / Supervisor
+- 实现 QualityGate — Reflection 质量评估
+- 实现 DAG 工作流编排（Phase1-6）
+- 接入三级 Prompt 管理系统
 
 ### Phase 5: 集成与优化（预计 3-5 天）
 
-- [ ] 重构 `review/service.go` 接入 Orchestrator
-- [ ] 扩展 SSE 流式输出（支持 Agent 思考过程可视化）
-- [ ] Agent 执行日志与可观测性
-- [ ] 数据库 migration
-- [ ] 端到端测试
+- 重构 `review/service.go` 接入 Orchestrator
+- 扩展 SSE 流式输出（支持 Agent 思考过程可视化）
+- Agent 执行日志与可观测性
+- 数据库 migration
+- 端到端测试
 
 ---
 
 ## 十二、与现有代码的对照关系
 
-| 现有模块 | 改造方式 | 说明 |
-|---------|---------|------|
-| `agent/service.go` | **保留** | 合同解析 Agent 保持不变 |
-| `review/service.go` → `ReviewContract()` | **重构** | 替换为 Orchestrator 调度 |
-| `review/service.go` → `ProcessContractReview()` | **重构** | 替换为 DAG 工作流 |
-| `review/service.go` → `splitTextByLength()` | **替换** | 替换为 ClauseAgent 智能拆分 |
-| `review/service.go` → `parseReviewResult()` | **优化** | Agent 输出已结构化，简化解析 |
-| `review/service.go` → `buildReviewPrompt()` | **替换** | Prompt 由 PromptManager + RAG 动态构建 |
-| `review/handler.go` → SSE 输出 | **扩展** | 增加 Agent 思考过程的实时输出 |
-| `prompts/model.go` & `repo.go` | **接入** | Orchestrator 加载三级 Prompt |
-| `review/model.go` | **扩展** | ReviewResult 增加验证字段 |
+
+| 现有模块                                            | 改造方式   | 说明                                |
+| ----------------------------------------------- | ------ | --------------------------------- |
+| `agent/service.go`                              | **保留** | 合同解析 Agent 保持不变                   |
+| `review/service.go` → `ReviewContract()`        | **重构** | 替换为 Orchestrator 调度               |
+| `review/service.go` → `ProcessContractReview()` | **重构** | 替换为 DAG 工作流                       |
+| `review/service.go` → `splitTextByLength()`     | **替换** | 替换为 ClauseAgent 智能拆分              |
+| `review/service.go` → `parseReviewResult()`     | **优化** | Agent 输出已结构化，简化解析                 |
+| `review/service.go` → `buildReviewPrompt()`     | **替换** | Prompt 由 PromptManager + RAG 动态构建 |
+| `review/handler.go` → SSE 输出                    | **扩展** | 增加 Agent 思考过程的实时输出                |
+| `prompts/model.go` & `repo.go`                  | **接入** | Orchestrator 加载三级 Prompt          |
+| `review/model.go`                               | **扩展** | ReviewResult 增加验证字段               |
+
 
 ---
 
@@ -1008,3 +1025,4 @@ github.com/milvus-io/milvus-sdk-go/v2  # Milvus Go SDK
 - [Shannon OSS](https://github.com/Kocoro-lab/Shannon) — 三层架构参考实现
 - [cloudwego/eino](https://github.com/cloudwego/eino) — 项目使用的 LLM 框架
 - [Milvus](https://milvus.io/) — 推荐的向量数据库
+

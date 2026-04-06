@@ -123,7 +123,7 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 
 	// 9. 启动后台处理
 	go func() {
-		err := h.reviewService.ProcessContractReview(ctx, task, contractContent, req.MaxConcurrent, resultChan)
+		err := h.reviewService.AgentReviewContract(ctx, task, contractContent, resultChan)
 		doneChan <- err
 		close(resultChan)
 	}()
@@ -170,6 +170,8 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 				SuggestedContent: reviewResult.SuggestedContent,
 				Reason:           reviewResult.Reason,
 				RiskType:         reviewResult.RiskType,
+				IsAccepted:       false,
+				CreatedAt:        reviewResult.CreatedAt.Format("2006-01-02 15:04:05"),
 			}
 
 			h.sendSSEMessage(c, SSEEventMessage, sseData)
