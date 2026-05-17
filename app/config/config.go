@@ -20,6 +20,33 @@ type LLMConfig struct {
 	Model   string `mapstructure:"model"`
 }
 
+type EmbeddingConfig struct {
+	Enabled        bool   `mapstructure:"enabled"`
+	APIKey         string `mapstructure:"api_key"`
+	APIBase        string `mapstructure:"api_url"`
+	Model          string `mapstructure:"model"`
+	Dimension      int    `mapstructure:"dimension"`
+	TimeoutSeconds int    `mapstructure:"timeout_seconds"`
+}
+
+type MilvusConfig struct {
+	Enabled    bool   `mapstructure:"enabled"`
+	Address    string `mapstructure:"address"`
+	Username   string `mapstructure:"username"`
+	Password   string `mapstructure:"password"`
+	DBName     string `mapstructure:"db_name"`
+	Collection string `mapstructure:"collection"`
+	Dimension  int    `mapstructure:"dimension"`
+	MetricType string `mapstructure:"metric_type"`
+	UseTLS     bool   `mapstructure:"use_tls"`
+}
+
+type VectorConfig struct {
+	Enabled   bool             `mapstructure:"enabled"`
+	Embedding *EmbeddingConfig `mapstructure:"embedding"`
+	Milvus    *MilvusConfig    `mapstructure:"milvus"`
+}
+
 type OSS struct {
 	Endpoint   string `mapstructure:"endpoint"`
 	AccessKey  string `mapstructure:"access_key"`
@@ -65,13 +92,14 @@ type CASConfig struct {
 }
 
 type Config struct {
-	Server    *Server    `mapstructure:"server"`
-	LLMConfig *LLMConfig `mapstructure:"llm_config"`
-	Mysql     *Mysql     `mapstructure:"mysql"`
-	Redis     *Redis     `mapstructure:"redis"`
-	CasConfig *CASConfig `mapstructure:"cas_config"`
-	JWT       *JWTConfig `mapstructure:"jwt"`
-	OSS       *OSS       `mapstructure:"oss"`
+	Server    *Server       `mapstructure:"server"`
+	LLMConfig *LLMConfig    `mapstructure:"llm_config"`
+	Mysql     *Mysql        `mapstructure:"mysql"`
+	Redis     *Redis        `mapstructure:"redis"`
+	CasConfig *CASConfig    `mapstructure:"cas_config"`
+	JWT       *JWTConfig    `mapstructure:"jwt"`
+	OSS       *OSS          `mapstructure:"oss"`
+	Vector    *VectorConfig `mapstructure:"vector"`
 }
 
 var (

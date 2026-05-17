@@ -72,21 +72,27 @@ type Clause struct {
 
 // RiskFinding 经过验证的风险发现
 type RiskFinding struct {
-	ClauseID        string       `json:"clause_id"`
-	RiskType        string       `json:"risk_type"`
-	RiskLevel       string       `json:"risk_level"`
-	RiskDescription string       `json:"risk_description"`
-	OriginalText    string       `json:"original_text"`
-	LegalBasis      []LegalBasis `json:"legal_basis"`
-	Verified        bool         `json:"verified"`
-	Confidence      float64      `json:"confidence"`
+	FindingID           string       `json:"finding_id,omitempty"`
+	ClauseID            string       `json:"clause_id"`
+	CandidateIDs        []string     `json:"candidate_ids,omitempty"`
+	RiskType            string       `json:"risk_type"`
+	RiskLevel           string       `json:"risk_level"`
+	RiskDescription     string       `json:"risk_description"`
+	OriginalText        string       `json:"original_text"`
+	LegalBasis          []LegalBasis `json:"legal_basis"`
+	Verified            bool         `json:"verified"`
+	RequiresHumanReview bool         `json:"requires_human_review,omitempty"`
+	Confidence          float64      `json:"confidence"`
+	SuggestedText       string       `json:"suggested_text,omitempty"`
+	SuggestionReason    string       `json:"suggestion_reason,omitempty"`
+	Priority            string       `json:"priority,omitempty"`
 }
 
 // LegalBasis 法律依据（来自 RAG 检索）
 type LegalBasis struct {
 	Source    string  `json:"source"`
-	Article  string  `json:"article"`
-	Content  string  `json:"content"`
+	Article   string  `json:"article"`
+	Content   string  `json:"content"`
 	Relevance float64 `json:"relevance"`
 }
 
@@ -126,6 +132,8 @@ type OrchestratorConfig struct {
 	TokenBudget          int           `json:"token_budget"`
 	Timeout              time.Duration `json:"timeout"`
 	MaxConcurrentAgents  int           `json:"max_concurrent_agents"`
+	RiskCandidateTopK    int           `json:"risk_candidate_top_k"`
+	RiskReviewBatchSize  int           `json:"risk_review_batch_size"`
 }
 
 // DefaultOrchestratorConfig 默认配置
@@ -135,10 +143,12 @@ func DefaultOrchestratorConfig() OrchestratorConfig {
 		MinIterations:        1,
 		ReflectionEnabled:    true,
 		ReflectionThreshold:  0.7,
-		MaxReflectionRetries: 2,
+		MaxReflectionRetries: 0,
 		TokenBudget:          100000,
 		Timeout:              10 * time.Minute,
 		MaxConcurrentAgents:  5,
+		RiskCandidateTopK:    8,
+		RiskReviewBatchSize:  3,
 	}
 }
 
@@ -193,11 +203,11 @@ type QualityEvaluation struct {
 
 // RetrievalResult RAG 检索结果
 type RetrievalResult struct {
-	ID        string            `json:"id"`
-	Content   string            `json:"content"`
-	Score     float64           `json:"score"`
-	Source    string            `json:"source"`
-	Metadata  map[string]string `json:"metadata"`
+	ID       string            `json:"id"`
+	Content  string            `json:"content"`
+	Score    float64           `json:"score"`
+	Source   string            `json:"source"`
+	Metadata map[string]string `json:"metadata"`
 }
 
 // ContractMeta 合同元信息

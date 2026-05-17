@@ -22,6 +22,7 @@ type IndexedChunkRow struct {
 	DocID      uint64 `gorm:"column:doc_id"`
 	ChunkIndex int    `gorm:"column:chunk_index"`
 	Content    string `gorm:"column:content"`
+	VectorID   string `gorm:"column:vector_id"`
 	Title      string `gorm:"column:title"`
 	Category   string `gorm:"column:category"`
 	SubCat     string `gorm:"column:sub_category"`
@@ -36,7 +37,7 @@ func (r *Repo) ListIndexedChunksForRAG(ctx context.Context) ([]IndexedChunkRow, 
 
 	var rows []IndexedChunkRow
 	err := r.db.WithContext(ctx).Table("review_knowledge_chunks AS c").
-		Select(`c.id AS chunk_id, c.doc_id, c.chunk_index, c.content,
+		Select(`c.id AS chunk_id, c.doc_id, c.chunk_index, c.content, c.vector_id,
 			d.title, d.category, d.sub_category, d.source`).
 		Joins("INNER JOIN review_knowledge_docs AS d ON d.id = c.doc_id").
 		Where("d.status = ?", "indexed").

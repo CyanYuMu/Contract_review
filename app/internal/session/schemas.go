@@ -45,16 +45,17 @@ type SessionResponse struct {
 
 // ReviewSessionResponse 审阅类型会话响应
 type ReviewSessionResponse struct {
-	SessionID   uint64 `json:"session_id"`   // 会话ID
-	Title       string `json:"title"`        // 会话主题
-	SessionType string `json:"session_type"` // 会话类型
-	FileID      uint64 `json:"file_id"`      // 关联文件ID
-	CreatedAt   string `json:"created_at"`   // 创建时间
-	PartyA      string `json:"party_a"`      // 甲方信息
-	PartyB      string `json:"party_b"`      // 乙方信息
-	FileName    string `json:"file_name"`    // 文件名
-	FilePath    string `json:"file_path"`    // 文件URL
-	IsAccepted  bool   `json:"is_accepted"`  // 是否已接受修订
+	SessionID    uint64 `json:"session_id"`    // 会话ID
+	Title        string `json:"title"`         // 会话主题
+	SessionType  string `json:"session_type"`  // 会话类型
+	FileID       uint64 `json:"file_id"`       // 关联文件ID
+	CreatedAt    string `json:"created_at"`    // 创建时间
+	PartyA       string `json:"party_a"`       // 甲方信息
+	PartyB       string `json:"party_b"`       // 乙方信息
+	FileName     string `json:"file_name"`     // 文件名
+	FilePath     string `json:"file_path"`     // 文件URL
+	IsAccepted   bool   `json:"is_accepted"`   // 是否已接受修订
+	ContractType string `json:"contract_type"` // 合同类型
 }
 
 // ReviewSessionListResponse 审阅类型会话列表响应

@@ -18,6 +18,7 @@ type FileInfo struct {
 	Title       string `json:"title"`        // 文件名
 	FileType    string `json:"file_type"`    // 文件类型
 	FilePath    string `json:"file_path"`    // 服务器存储路径
+	FileURL     string `json:"file_url"`     // 前端可访问的静态文件地址
 	DownloadURL string `json:"download_url"` // 下载接口
 }
 

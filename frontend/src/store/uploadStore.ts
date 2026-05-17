@@ -1,7 +1,7 @@
 'use client';
 import {create} from 'zustand'
 
-type UploadData = {
+export type UploadData = {
     file_id?: number;
     title?: string;
     file_type?: string;

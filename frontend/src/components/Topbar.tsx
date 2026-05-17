@@ -9,6 +9,7 @@ type TopbarProps = {
     onLoginClick?: () => void;
     onLogoutClick?: () => void;
     activeTab?: TabType | null;
+    onTabClick?: (tab: TabType) => void;
 };
 
 export default function Topbar({
@@ -16,6 +17,7 @@ export default function Topbar({
                                    onLoginClick,
                                    onLogoutClick,
                                    activeTab,
+                                   onTabClick,
                                }: TopbarProps) {
     return (
         <div
@@ -44,6 +46,7 @@ export default function Topbar({
                     onLoginClick={onLoginClick}
                     onLogoutClick={onLogoutClick}
                     activeTab={activeTab}
+                    onTabClick={onTabClick}
                 />
             </div>
         </div>

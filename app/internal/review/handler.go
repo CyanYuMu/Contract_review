@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"contract_review/app/internal/contract"
 	"contract_review/app/internal/global"
@@ -109,7 +110,7 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 
 	// 9. 启动后台处理
 	go func() {
-		err := h.reviewService.AgentReviewContract(ctx, task, contractContent, resultChan)
+		err := h.reviewService.AgentReviewContract(ctx, task, contractInfo, contractContent, resultChan)
 		doneChan <- err
 		close(resultChan)
 	}()
@@ -117,8 +118,14 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 	// 10. 流式输出结果
 	globalIndex := 1
 	totalIssues := 0
+	resultByStableKey := make(map[string]*ReviewResult)
 
 	for result := range resultChan {
+		if result.Progress != nil {
+			h.sendSSEMessage(c, SSEEventProgress, result.Progress)
+			continue
+		}
+
 		if result.Error != nil {
 			global.Log.Error("分块处理错误", zap.Int("index", result.Index), zap.Error(result.Error))
 			continue
@@ -126,22 +133,33 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 
 		// 处理每个修改点
 		for _, mod := range result.Modifications {
-			// 创建审阅结果记录
-			reviewResult := &ReviewResult{
-				SessionID:        task.SessionID,
-				TaskID:           task.ID,
-				Index:            globalIndex,
-				OriginalContent:  mod.OriginalContent,
-				RiskAnalysis:     mod.RiskAnalysis,
-				RiskLevel:        mod.RiskLevel,
-				SuggestedContent: mod.SuggestedContent,
-				Reason:           mod.Reason,
-				RiskType:         mod.RiskType,
-			}
+			stableKey := stableModificationKey(mod)
+			reviewResult, exists := resultByStableKey[stableKey]
+			if exists {
+				mergeReviewResult(reviewResult, mod)
+				if err := h.reviewService.UpdateReviewResult(ctx, reviewResult); err != nil {
+					global.Log.Error("更新审阅结果失败", zap.Error(err))
+				}
+			} else {
+				reviewResult = &ReviewResult{
+					SessionID:        task.SessionID,
+					TaskID:           task.ID,
+					Index:            globalIndex,
+					OriginalContent:  mod.OriginalContent,
+					RiskAnalysis:     mod.RiskAnalysis,
+					RiskLevel:        mod.RiskLevel,
+					SuggestedContent: mod.SuggestedContent,
+					Reason:           mod.Reason,
+					RiskType:         mod.RiskType,
+				}
 
-			// 保存到数据库
-			if err := h.reviewService.CreateReviewResult(ctx, reviewResult); err != nil {
-				global.Log.Error("保存审阅结果失败", zap.Error(err))
+				// 保存到数据库
+				if err := h.reviewService.CreateReviewResult(ctx, reviewResult); err != nil {
+					global.Log.Error("保存审阅结果失败", zap.Error(err))
+				}
+				resultByStableKey[stableKey] = reviewResult
+				globalIndex++
+				totalIssues++
 			}
 
 			// 发送SSE消息
@@ -149,7 +167,7 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 				ID:               reviewResult.ID,
 				SessionID:        reviewResult.SessionID,
 				TaskID:           reviewResult.TaskID,
-				Index:            globalIndex,
+				Index:            reviewResult.Index,
 				OriginalContent:  reviewResult.OriginalContent,
 				RiskAnalysis:     reviewResult.RiskAnalysis,
 				RiskLevel:        reviewResult.RiskLevel,
@@ -161,8 +179,6 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 			}
 
 			h.sendSSEMessage(c, SSEEventMessage, sseData)
-			globalIndex++
-			totalIssues++
 		}
 	}
 
@@ -393,6 +409,48 @@ func (h *ReviewHandler) sendSSEMessage(c *app.RequestContext, event SSEEvent, da
 // sendSSEError 发送SSE错误消息
 func (h *ReviewHandler) sendSSEError(c *app.RequestContext, message string) {
 	h.sendSSEMessage(c, SSEEventError, ReviewSSEErrorData{Message: message})
+}
+
+func stableModificationKey(mod ModificationItem) string {
+	if strings.TrimSpace(mod.StableKey) != "" {
+		return mod.StableKey
+	}
+	parts := []string{
+		mod.Position,
+		mod.RiskType,
+		truncateReviewKey(mod.OriginalContent, 80),
+		truncateReviewKey(mod.RiskAnalysis, 80),
+	}
+	return strings.Join(parts, "|")
+}
+
+func mergeReviewResult(result *ReviewResult, mod ModificationItem) {
+	if strings.TrimSpace(mod.OriginalContent) != "" {
+		result.OriginalContent = mod.OriginalContent
+	}
+	if strings.TrimSpace(mod.RiskAnalysis) != "" {
+		result.RiskAnalysis = mod.RiskAnalysis
+	}
+	if strings.TrimSpace(mod.RiskLevel) != "" {
+		result.RiskLevel = mod.RiskLevel
+	}
+	if strings.TrimSpace(mod.SuggestedContent) != "" {
+		result.SuggestedContent = mod.SuggestedContent
+	}
+	if strings.TrimSpace(mod.Reason) != "" {
+		result.Reason = mod.Reason
+	}
+	if strings.TrimSpace(mod.RiskType) != "" {
+		result.RiskType = mod.RiskType
+	}
+}
+
+func truncateReviewKey(value string, max int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= max {
+		return string(runes)
+	}
+	return string(runes[:max])
 }
 
 // taskToResponse 将ReviewTask转换为响应结构

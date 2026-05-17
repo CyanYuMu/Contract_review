@@ -5,8 +5,9 @@ import { ContrastuploadStore } from '@/store/ContrastuploadStore';
 import Topbar from '@/components/Topbar';
 import type { TabType } from '@/components/TopbarTabs';
 import { useRouter } from 'next/navigation';
-import { resolveFileUrl } from '@/utils/url';
+import { buildStaticFileUrl, resolveFileUrl } from '@/utils/url';
 import { startComparisonTask } from '@/lib/api/contrastApi';
+import { getHistoryDetail } from '@/lib/api/getHistoryDetail';
 import { getUserInfo } from '@/lib/api/user';
 import { clearTokenInfo } from '@/utils/client';
 import { logout } from '@/lib/api/logout';
@@ -17,8 +18,268 @@ import { authDatedHandler } from '@/utils/authDatedHandler';
 
 
 type ComparisonItem = 
-  | { id: string; type: 'added' | 'deleted'; content: string; position: string; isIgnored?: boolean }
-  | { id: string; type: 'modified'; original: string; modified: string; position: string; char_diff?: any[]; isIgnored?: boolean }; 
+  | {
+      id: string;
+      type: 'added' | 'deleted';
+      content: string;
+      position: string;
+      stdIndex?: number;
+      cmpIndex?: number;
+      standardText?: string;
+      comparisonText?: string;
+      isIgnored?: boolean;
+    }
+  | {
+      id: string;
+      type: 'modified';
+      original: string;
+      modified: string;
+      position: string;
+      stdIndex?: number;
+      cmpIndex?: number;
+      standardText?: string;
+      comparisonText?: string;
+      char_diff?: ComparisonCharDiff[];
+      isIgnored?: boolean;
+    };
+
+type ComparisonCharDiff = {
+  operation?: string;
+  std_text?: string;
+  cmp_text?: string;
+  std_range?: number[];
+  cmp_range?: number[];
+};
+
+type RawComparisonDiff = {
+  operation?: string;
+  std_index?: number;
+  cmp_index?: number;
+  standard_text?: string;
+  comparison_text?: string;
+  char_diff?: ComparisonCharDiff[];
+};
+
+type ComparisonFilePayload = {
+  file_id?: number;
+  title?: string;
+  file_type?: string;
+  file_path?: string;
+  file_url?: string;
+  download_url?: string;
+};
+
+type ComparisonPayload = {
+  session_id?: number | string;
+  diffs?: unknown[];
+  diff_result?: unknown[];
+  diff_list?: unknown[];
+  standard_file?: ComparisonFilePayload;
+  comparison_file?: ComparisonFilePayload;
+};
+
+type ComparisonError = {
+  response?: {
+    data?: {
+      msg?: string;
+    };
+  };
+};
+
+const DIFF_TOKEN_SELECTOR = '[data-comparison-diff-token="true"]';
+const DIFF_PARAGRAPH_CLASSES = [
+  'diff-added',
+  'diff-deleted',
+  'diff-modified',
+  'diff-current',
+];
+
+const normalizeParagraphText = (text?: string) =>
+  (text || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const getDiffPosition = (stdIndex?: number, cmpIndex?: number, fallbackIndex = 0) => {
+  const index = stdIndex ?? cmpIndex ?? fallbackIndex;
+  return `第${index + 1}段`;
+};
+
+const toRenderableFileUrl = (rawUrl?: string) => {
+  const url = (rawUrl || '').trim();
+  if (!url) return '';
+
+  if (/^(data:|blob:)/i.test(url)) {
+    return url;
+  }
+
+  if (/^https?:\/\//i.test(url)) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.pathname.startsWith('/api/static/') || parsed.pathname.startsWith('/uploads/')) {
+        return buildStaticFileUrl(url);
+      }
+    } catch {
+      return url;
+    }
+    return url;
+  }
+
+  if (
+    url.startsWith('/api/static/') ||
+    url.startsWith('/uploads/') ||
+    url.startsWith('uploads/')
+  ) {
+    return buildStaticFileUrl(url);
+  }
+
+  const slashPath = url.replace(/\\/g, '/');
+  const staticIndex = slashPath.indexOf('/api/static/');
+  if (staticIndex >= 0) {
+    return buildStaticFileUrl(slashPath.slice(staticIndex));
+  }
+
+  const uploadIndex = slashPath.lastIndexOf('/uploads/');
+  if (uploadIndex >= 0) {
+    const fileName = slashPath.slice(uploadIndex + '/uploads/'.length).split(/[?#]/)[0];
+    if (fileName) {
+      return buildStaticFileUrl(`/api/static/${fileName}`);
+    }
+  }
+
+  if (slashPath.startsWith('/')) {
+    const fileName = slashPath.split('/').filter(Boolean).pop();
+    if (fileName && /\.[a-z0-9]+$/i.test(fileName)) {
+      return buildStaticFileUrl(`/api/static/${fileName}`);
+    }
+  }
+
+  return resolveFileUrl(url);
+};
+
+const getParagraphs = (iframeDoc: Document) => {
+  return Array.from(iframeDoc.querySelectorAll('p, .docx-paragraph'))
+    .filter((node): node is HTMLElement => node.nodeType === Node.ELEMENT_NODE)
+    .filter((node) => normalizeParagraphText(node.textContent).length > 0);
+};
+
+const unwrapDiffTokens = (root: Document | HTMLElement) => {
+  root.querySelectorAll(DIFF_TOKEN_SELECTOR).forEach((token) => {
+    const textNode = token.ownerDocument.createTextNode(token.textContent || '');
+    token.parentNode?.replaceChild(textNode, token);
+  });
+};
+
+const clearDiffHighlighting = (iframeDoc: Document) => {
+  unwrapDiffTokens(iframeDoc);
+  iframeDoc.querySelectorAll('.diff-added, .diff-deleted, .diff-modified, .diff-current').forEach((node) => {
+    node.classList.remove(...DIFF_PARAGRAPH_CLASSES);
+  });
+  iframeDoc.body?.normalize();
+};
+
+const findParagraph = (paragraphs: HTMLElement[], index?: number, text?: string) => {
+  if (typeof index === 'number' && index >= 0 && index < paragraphs.length) {
+    return paragraphs[index];
+  }
+
+  const targetText = normalizeParagraphText(text);
+  if (!targetText) return null;
+
+  return (
+    paragraphs.find((paragraph) => normalizeParagraphText(paragraph.textContent) === targetText) ||
+    paragraphs.find((paragraph) => {
+      const paragraphText = normalizeParagraphText(paragraph.textContent);
+      return paragraphText.includes(targetText) || targetText.includes(paragraphText);
+    }) ||
+    null
+  );
+};
+
+const codePointRangeToCodeUnitRange = (text: string, range: number[]) => {
+  const chars = Array.from(text);
+  const start = Math.max(0, Math.min(range[0] ?? 0, chars.length));
+  const end = Math.max(start, Math.min(range[1] ?? start, chars.length));
+  return {
+    start: chars.slice(0, start).join('').length,
+    end: chars.slice(0, end).join('').length,
+  };
+};
+
+const normalizeRanges = (text: string, ranges: number[][]) => {
+  return ranges
+    .map((range) => codePointRangeToCodeUnitRange(text, range))
+    .filter((range) => range.end > range.start)
+    .sort((a, b) => a.start - b.start)
+    .reduce<Array<{ start: number; end: number }>>((merged, range) => {
+      const previous = merged[merged.length - 1];
+      if (previous && range.start <= previous.end) {
+        previous.end = Math.max(previous.end, range.end);
+      } else {
+        merged.push({ ...range });
+      }
+      return merged;
+    }, []);
+};
+
+const wrapTextRanges = (paragraph: HTMLElement, rawRanges: number[][], className: string) => {
+  const paragraphText = paragraph.textContent || '';
+  const ranges = normalizeRanges(paragraphText, rawRanges);
+  if (ranges.length === 0) return;
+
+  const doc = paragraph.ownerDocument;
+  const walker = doc.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  let node = walker.nextNode();
+  while (node) {
+    if (node.textContent) {
+      textNodes.push(node as Text);
+    }
+    node = walker.nextNode();
+  }
+
+  let globalOffset = 0;
+  textNodes.forEach((textNode) => {
+    const text = textNode.nodeValue || '';
+    const nodeStart = globalOffset;
+    const nodeEnd = nodeStart + text.length;
+    globalOffset = nodeEnd;
+
+    const nodeRanges = ranges
+      .map((range) => ({
+        start: Math.max(range.start, nodeStart) - nodeStart,
+        end: Math.min(range.end, nodeEnd) - nodeStart,
+      }))
+      .filter((range) => range.end > range.start);
+
+    if (nodeRanges.length === 0) return;
+
+    const fragment = doc.createDocumentFragment();
+    let cursor = 0;
+    nodeRanges.forEach((range) => {
+      if (range.start > cursor) {
+        fragment.appendChild(doc.createTextNode(text.slice(cursor, range.start)));
+      }
+      const span = doc.createElement('span');
+      span.dataset.comparisonDiffToken = 'true';
+      span.className = className;
+      span.textContent = text.slice(range.start, range.end);
+      fragment.appendChild(span);
+      cursor = range.end;
+    });
+    if (cursor < text.length) {
+      fragment.appendChild(doc.createTextNode(text.slice(cursor)));
+    }
+    textNode.parentNode?.replaceChild(fragment, textNode);
+  });
+};
+
+const highlightWholeParagraph = (paragraph: HTMLElement, className: string) => {
+  const textLength = Array.from(paragraph.textContent || '').length;
+  if (textLength > 0) {
+    wrapTextRanges(paragraph, [[0, textLength]], className);
+  }
+};
 
 export default function ContractResult() {
   const router = useRouter();
@@ -110,15 +371,18 @@ export default function ContractResult() {
     setRegisterVisible(false);
     setLoginVisible(true);
   };
-  const buildComparisonResults = (diffs: any[]): ComparisonItem[] => {
-    const items = diffs.map((diff: any, index: number): ComparisonItem | null => {
-      const position = `第${diff.std_index || diff.cmp_index || 1}段`;
+  const buildComparisonResults = (diffs: unknown[]): ComparisonItem[] => {
+    const items = diffs.map((rawDiff, index: number): ComparisonItem | null => {
+      const diff = rawDiff as RawComparisonDiff;
+      const position = getDiffPosition(diff.std_index, diff.cmp_index, index);
       if (diff.operation === 'add' || diff.operation === 'insert') {
         return {
           id: `added-${index}`,
           type: 'added' as const,
           content: `${diff.comparison_text || '新增内容'}`,
-          position
+          position,
+          cmpIndex: diff.cmp_index,
+          comparisonText: diff.comparison_text || ''
         };
       }
       if (diff.operation === 'delete' || diff.operation === 'remove') {
@@ -126,7 +390,9 @@ export default function ContractResult() {
           id: `deleted-${index}`,
           type: 'deleted' as const,
           content: `标准合同：${diff.standard_text || '删除内容'}`,
-          position
+          position,
+          stdIndex: diff.std_index,
+          standardText: diff.standard_text || ''
         };
       }
       if (diff.operation === 'replace' || diff.operation === 'update') {
@@ -136,6 +402,10 @@ export default function ContractResult() {
           original: `标准合同：${diff.standard_text || '原始内容'}`,
           modified: `${diff.comparison_text || '修改内容'}`,
           position,
+          stdIndex: diff.std_index,
+          cmpIndex: diff.cmp_index,
+          standardText: diff.standard_text || '',
+          comparisonText: diff.comparison_text || '',
           char_diff: diff.char_diff || []
         };
       }
@@ -259,7 +529,12 @@ export default function ContractResult() {
   }, [activeMenu, resultStats]);
   
   // 获取全局状态中的文档数据
-  const { originalFile, comparisonFile } = ContrastuploadStore();
+  const {
+    originalFile,
+    comparisonFile,
+    setOriginalFile,
+    setComparisonFile,
+  } = ContrastuploadStore();
   
   // 用于渲染文档的DOM节点引用
   const originalDocRef = useRef<HTMLDivElement>(null);
@@ -511,6 +786,78 @@ export default function ContractResult() {
   
   // 调用API获取对比结果
   useEffect(() => {
+    const isRecord = (value: unknown): value is Record<string, unknown> => {
+      return typeof value === 'object' && value !== null;
+    };
+
+    const normalizeComparisonPayload = (raw: unknown): ComparisonPayload | null => {
+      if (!isRecord(raw)) return null;
+
+      const firstData = raw.data;
+      if (isRecord(firstData) && isRecord(firstData.data)) {
+        return firstData.data as ComparisonPayload;
+      }
+      if (isRecord(firstData)) {
+        return firstData as ComparisonPayload;
+      }
+      return raw as ComparisonPayload;
+    };
+
+    const getFileRenderUrl = (fileInfo?: ComparisonFilePayload) => {
+      return (
+        toRenderableFileUrl(fileInfo?.file_url) ||
+        toRenderableFileUrl(fileInfo?.file_path) ||
+        toRenderableFileUrl(fileInfo?.download_url)
+      );
+    };
+
+    const hydrateComparisonWorkspace = (payload: ComparisonPayload | null) => {
+      if (!payload) return;
+
+      const standardFile = payload.standard_file ?? {};
+      const comparisonFileInfo = payload.comparison_file ?? {};
+      const standardUrl = getFileRenderUrl(standardFile);
+      const comparisonUrl = getFileRenderUrl(comparisonFileInfo);
+
+      if (standardFile.file_id || standardUrl || standardFile.title) {
+        setOriginalFile({
+          file_id: standardFile.file_id,
+          title: standardFile.title,
+          file_type: standardFile.file_type,
+          file_url: standardUrl || originalFile?.file_url,
+        });
+      }
+
+      if (comparisonFileInfo.file_id || comparisonUrl || comparisonFileInfo.title) {
+        setComparisonFile({
+          file_id: comparisonFileInfo.file_id,
+          title: comparisonFileInfo.title,
+          file_type: comparisonFileInfo.file_type,
+          file_url: comparisonUrl || comparisonFile?.file_url,
+        });
+      }
+
+      if (payload.session_id) {
+        localStorage.setItem('comparison_session_id', String(payload.session_id));
+      }
+      if (standardFile.file_id && comparisonFileInfo.file_id) {
+        localStorage.setItem('comparison_pair_key', `${standardFile.file_id}:${comparisonFileInfo.file_id}`);
+      }
+      localStorage.setItem('contrast_workspace_active', '1');
+    };
+
+    const applyComparisonPayload = (payload: unknown) => {
+      const normalizedPayload = normalizeComparisonPayload(payload);
+      const diffs = normalizedPayload?.diffs ?? normalizedPayload?.diff_result ?? normalizedPayload?.diff_list ?? [];
+      if (!Array.isArray(diffs)) return false;
+
+      hydrateComparisonWorkspace(normalizedPayload);
+      setComparisonResults(buildComparisonResults(diffs));
+      setLoading(false);
+      setError(null);
+      return true;
+    };
+
     const fetchComparisonResult = async () => {
       setLoading(true);
       setError(null);
@@ -520,12 +867,9 @@ export default function ContractResult() {
         if (historyRaw) {
           try {
             const historyData = JSON.parse(historyRaw);
-            const historyPayload = historyData?.data ?? historyData;
-            const historyDiffs = historyPayload?.diffs ?? historyPayload?.diff_list ?? [];
-            if (Array.isArray(historyDiffs)) {
-              setComparisonResults(buildComparisonResults(historyDiffs));
-              setLoading(false);
-              setError(null);
+            const historyPayload = normalizeComparisonPayload(historyData);
+            if (applyComparisonPayload(historyPayload)) {
+              localStorage.setItem('comparison_result', JSON.stringify(historyPayload));
               localStorage.removeItem('comparison_history_detail');
               return;
             }
@@ -537,19 +881,24 @@ export default function ContractResult() {
         if (latestRaw) {
           try {
             const latestData = JSON.parse(latestRaw);
-            const latestPayload = latestData?.data ?? latestData;
-            const latestDiffs = latestPayload?.diffs ?? [];
-            if (Array.isArray(latestDiffs)) {
-              setComparisonResults(buildComparisonResults(latestDiffs));
-              setLoading(false);
-              setError(null);
-              localStorage.removeItem('comparison_result');
+            if (applyComparisonPayload(latestData)) {
               return;
             }
           } catch (e) {
             console.error('解析最新对比结果失败:', e);
           }
         }
+
+        const savedSessionId = localStorage.getItem('comparison_session_id');
+        if (savedSessionId) {
+          const detail = await getHistoryDetail(savedSessionId);
+          const detailPayload = normalizeComparisonPayload(detail);
+          if (applyComparisonPayload(detailPayload)) {
+            localStorage.setItem('comparison_result', JSON.stringify(detailPayload));
+            return;
+          }
+        }
+
         // 从状态中获取文档ID
         const standardFileId = originalFile?.file_id;
         const comparisonFileId = comparisonFile?.file_id;
@@ -563,186 +912,102 @@ export default function ContractResult() {
         const result = await startComparisonTask(
           standardFileId,
           comparisonFileId,
-          `比对: ${originalFile?.title || '标准文档'} vs ${comparisonFile?.title || '对比文档'}`
+          `比对: ${originalFile?.title || '标准文档'} vs ${comparisonFile?.title || '对比文档'}`,
+          savedSessionId ? Number(savedSessionId) : undefined
         );
 
-     
-        const diffs = result.data?.diffs || [];
+        const resultPayload = normalizeComparisonPayload(result);
+        localStorage.setItem('comparison_result', JSON.stringify(resultPayload));
+        if (standardFileId && comparisonFileId) {
+          localStorage.setItem('comparison_pair_key', `${standardFileId}:${comparisonFileId}`);
+        }
+        localStorage.setItem('contrast_workspace_active', '1');
+        if (resultPayload?.session_id) {
+          localStorage.setItem('comparison_session_id', String(resultPayload.session_id));
+        }
+
+        const diffs = resultPayload?.diffs || [];
         setComparisonResults(buildComparisonResults(diffs));
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error('获取对比结果失败:', error);
-        setError(error.response?.data?.msg || '获取对比结果失败，请稍后重试');
+        const comparisonError = error as ComparisonError;
+        setError(comparisonError.response?.data?.msg || '获取对比结果失败，请稍后重试');
       } finally {
         setLoading(false);
       }
     };
 
     fetchComparisonResult();
-  }, [originalFile, comparisonFile]);
+  }, [
+    originalFile?.file_id,
+    originalFile?.file_url,
+    originalFile?.title,
+    comparisonFile?.file_id,
+    comparisonFile?.file_url,
+    comparisonFile?.title,
+    setComparisonFile,
+    setOriginalFile,
+  ]);
   
   // 应用差异高亮的函数
   const applyDiffHighlighting = (iframeDoc: Document, isOriginalDoc: boolean) => {
-    // 确保有差异结果可以处理
-    if (!comparisonResults || comparisonResults.length === 0) {
-      console.log('没有差异结果可以应用高亮');
-      return;
-    }
-    
-    // 获取文档中的所有段落
-    const paragraphs = iframeDoc.querySelectorAll('.docx-paragraph, p');
-    if (paragraphs.length === 0) {
-      console.log('没有找到文档段落');
-      return;
-    }
-    
-    console.log(`找到${paragraphs.length}个段落，开始应用高亮`);
-    
-    // 1. 清除所有现有的高亮样式
-    paragraphs.forEach(paragraph => {
-      const p = paragraph as HTMLElement;
-   
-      p.classList.remove('diff-added', 'diff-removed', 'diff-modified');
-    
-      const modifiedWords = p.querySelectorAll('.diff-modified-word');
-      modifiedWords.forEach(word => {
-       
-        const textNode = document.createTextNode(word.textContent || '');
-        word.parentNode?.replaceChild(textNode, word);
-      });
-    
-      if (p.innerHTML !== p.textContent) {
-        p.textContent = p.textContent || '';
+    clearDiffHighlighting(iframeDoc);
+
+    if (!comparisonResults || comparisonResults.length === 0) return;
+
+    const paragraphs = getParagraphs(iframeDoc);
+    if (paragraphs.length === 0) return;
+
+    comparisonResults.forEach((result) => {
+      if (result.isIgnored) return;
+
+      if (isOriginalDoc) {
+        if (result.type === 'added') return;
+
+        const paragraph = findParagraph(paragraphs, result.stdIndex, result.standardText);
+        if (!paragraph) return;
+
+        if (result.type === 'deleted') {
+          paragraph.classList.add('diff-deleted');
+          highlightWholeParagraph(paragraph, 'diff-token diff-deleted-token');
+          return;
+        }
+        if (result.type !== 'modified') return;
+
+        paragraph.classList.add('diff-modified');
+        const ranges = (result.char_diff || [])
+          .map((diff) => diff.std_range)
+          .filter((range): range is number[] => Array.isArray(range) && range.length >= 2);
+        if (ranges.length > 0) {
+          wrapTextRanges(paragraph, ranges, 'diff-token diff-modified-old-token');
+        } else {
+          highlightWholeParagraph(paragraph, 'diff-token diff-modified-old-token');
+        }
+        return;
       }
 
-    });
-    
-    // 创建一个新的段落数组，用于处理可能的插入操作
-    let updatedParagraphs = Array.from(paragraphs);
-    
-    // 遍历所有差异结果，跳过被忽略的结果
-    comparisonResults.forEach((result) => {
-      // 如果结果被忽略，跳过高亮处理
-      if (result.isIgnored) {
+      if (result.type === 'deleted') return;
+
+      const paragraph = findParagraph(paragraphs, result.cmpIndex, result.comparisonText);
+      if (!paragraph) return;
+
+      if (result.type === 'added') {
+        paragraph.classList.add('diff-added');
+        highlightWholeParagraph(paragraph, 'diff-token diff-added-token');
         return;
       }
-      
-      // 解析位置信息，提取段落索引
-      const positionMatch = result.position.match(/第(\d+)段/);
-      if (!positionMatch) {
-        console.log('无法解析位置信息:', result.position);
-        return;
-      }
-      
-      const paragraphIndex = parseInt(positionMatch[1]) - 1; // 转换为0-based索引
-      
-      // 检查段落索引是否有效
-      if (paragraphIndex < 0 || paragraphIndex >= updatedParagraphs.length) {
-        console.log('段落索引超出范围:', paragraphIndex);
-        return;
-      }
-      
-      const paragraph = updatedParagraphs[paragraphIndex] as HTMLElement;
-      
-      // 根据文档类型和差异类型应用不同的高亮
-      if (isOriginalDoc) {
-        // 原始文档（标准文档）
-        // 标准文档不需要显示任何高亮样式和占位符
+      if (result.type !== 'modified') return;
+
+      paragraph.classList.add('diff-modified');
+      const ranges = (result.char_diff || [])
+        .map((diff) => diff.cmp_range)
+        .filter((range): range is number[] => Array.isArray(range) && range.length >= 2);
+      if (ranges.length > 0) {
+        wrapTextRanges(paragraph, ranges, 'diff-token diff-modified-new-token');
       } else {
-        // 对比文档显示添加、删除或修改的内容
-        if (result.type === 'added') {
-          paragraph.classList.add('diff-added');
-        } else if (result.type === 'deleted') {
-          // 对比文档中删除的内容
-          // 确保删除的内容在对比文档中显示并高亮
-          if (paragraph) {
-            paragraph.classList.add('diff-removed');
-          } else {
-            // 如果段落不存在，创建一个新的段落来显示删除的内容
-            const deletedParagraph = document.createElement('p');
-            deletedParagraph.className = 'docx-paragraph diff-removed';
-            deletedParagraph.textContent = result.content.replace('删除条款：', '');
-            
-            // 将删除的内容插入到对比文档的相应位置
-            if (paragraphIndex < updatedParagraphs.length) {
-              updatedParagraphs[paragraphIndex].parentElement?.insertBefore(deletedParagraph, updatedParagraphs[paragraphIndex]);
-              // 更新段落数组，确保后续的操作正确
-              updatedParagraphs = Array.from(iframeDoc.querySelectorAll('.docx-paragraph, p'));
-            }
-          }
-        } else if (result.type === 'modified') {
-            // 对比文档中修改的内容
-            // 添加段落级别的diff-modified类，确保修改的内容有高亮显示
-            paragraph.classList.add('diff-modified');
-            
-            // 对于修改的内容，在对比文档中标记添加和删除的词语
-            const originalText = result.original.replace('原条款：', '');
-            const modifiedText = result.modified.replace('修改为：', '');
-            
-            // 使用后端返回的char_diff信息来精确高亮词语级差异
-            let highlightedText = '';
-            if (result.char_diff && result.char_diff.length > 0) {
-              // 有精确的字符级差异信息，使用它来高亮
-              let currentIndex = 0;
-              const modifiedTextContent = modifiedText;
-              
-              // 对差异进行排序，确保从左到右处理
-              const sortedDiff = [...result.char_diff].sort((a, b) => a.cmp_range[0] - b.cmp_range[0]);
-              
-              sortedDiff.forEach(diff => {
-                // 添加差异前的正常文本
-                highlightedText += modifiedTextContent.substring(currentIndex, diff.cmp_range[0]);
-                
-                // 添加差异文本，使用修改样式
-                highlightedText += `<span class="diff-modified-word">${modifiedTextContent.substring(diff.cmp_range[0], diff.cmp_range[1])}</span>`;
-                
-                currentIndex = diff.cmp_range[1];
-              });
-              
-              // 添加最后一个差异后的正常文本
-              highlightedText += modifiedTextContent.substring(currentIndex);
-            } else {
-              // 没有字符级差异信息，使用简单的词语差异高亮
-              highlightedText = highlightWordDifferences(originalText, modifiedText, false);
-            }
-            
-            // 始终更新段落内容，确保修改的内容有高亮显示
-            paragraph.innerHTML = highlightedText;
-        }
+        highlightWholeParagraph(paragraph, 'diff-token diff-modified-new-token');
       }
     });
-    
-    console.log('差异高亮应用完成');
-  };
-  
-  // 词语级差异高亮函数
-  const highlightWordDifferences = (original: string, modified: string, isOriginal: boolean) => {
-    // 将文本拆分为词语数组
-    const originalWords = original.split(/(\s+)/);
-    const modifiedWords = modified.split(/(\s+)/);
-    
-    // 简单的词语差异检测（实际应用中可能需要更复杂的算法）
-    if (originalWords.length !== modifiedWords.length) {
-      // 如果词语数量不同，直接返回完整的高亮
-      return isOriginal 
-        ? `<span class="diff-removed">${original}</span>`
-        : `<span class="diff-modified-word">${modified}</span>`;
-    }
-    
-    // 对比每个词语
-    const highlightedWords = modifiedWords.map((word, index) => {
-      if (index < originalWords.length && word !== originalWords[index]) {
-        if (isOriginal) {
-          // 原始文档中被修改的词语：保留删除样式（红色）
-          return `<span class="diff-removed">${originalWords[index]}</span>`;
-        } else {
-          // 对比文档中修改后的词语：使用修改样式（黄色）
-          return `<span class="diff-modified-word">${word}</span>`;
-        }
-      }
-      return isOriginal ? originalWords[index] : word;
-    });
-    
-    return highlightedWords.join('');
   };
   
   // 渲染文档的函数（更新为支持iframe引用）
@@ -870,21 +1135,45 @@ export default function ContractResult() {
                         page-break-inside: avoid;
                       }
                       .diff-added {
-                       background: rgba(232, 243, 255, 1);
-                     
+                        background: rgba(232, 243, 255, 1);
+                        border-left-color: rgba(34, 96, 242, 1);
                       }
-                      .diff-removed {
-                       background: rgba(255, 206, 206, 1);
-                    
+                      .diff-deleted {
+                        background: rgba(255, 235, 235, 1);
+                        border-left-color: rgba(212, 48, 48, 1);
                       }
                       .diff-modified {
-                       background: rgba(250, 223, 170, 1);
-                    
+                        background: rgba(255, 247, 218, 1);
+                        border-left-color: rgba(255, 195, 0, 1);
                       }
-                      /* 词语级修改的高亮样式 */
-                      .diff-modified-word {
-                       background: rgba(255, 195, 0, 0.4);
-                       text-decoration: underline;
+                      .diff-current {
+                        outline: 2px solid rgba(34, 96, 242, 0.75);
+                        outline-offset: 2px;
+                      }
+                      .diff-token {
+                        border-radius: 3px;
+                        padding: 0 2px;
+                        box-decoration-break: clone;
+                        -webkit-box-decoration-break: clone;
+                      }
+                      .diff-added-token {
+                        background: rgba(34, 96, 242, 0.18);
+                        color: rgba(22, 76, 190, 1);
+                        border-bottom: 2px solid rgba(34, 96, 242, 0.55);
+                      }
+                      .diff-deleted-token,
+                      .diff-modified-old-token {
+                        background: rgba(212, 48, 48, 0.18);
+                        color: rgba(170, 33, 33, 1);
+                        border-bottom: 2px solid rgba(212, 48, 48, 0.55);
+                      }
+                      .diff-deleted-token {
+                        text-decoration: line-through;
+                      }
+                      .diff-modified-new-token {
+                        background: rgba(255, 195, 0, 0.35);
+                        color: rgba(118, 86, 0, 1);
+                        border-bottom: 2px solid rgba(255, 195, 0, 0.75);
                       }
                      
                       table {
@@ -926,6 +1215,9 @@ export default function ContractResult() {
     
     // 获取文档数据
     const response = await fetch(resolvedFileUrl);
+    if (!response.ok) {
+      throw new Error(`获取文档失败: ${response.status} ${response.statusText}`);
+    }
     const arrayBuffer = await response.arrayBuffer();
     
     // 动态导入docx-preview并渲染文档到iframe中
@@ -980,14 +1272,15 @@ export default function ContractResult() {
         });
         
         // 处理每个页面的样式，隐藏页码
-        pages.forEach((page: any) => {
-          page.style.margin = '40px auto';
-          page.style.padding = '60px 40px';
-          page.style.position = 'relative';
-          page.style.boxShadow = '0 1px 3px rgba(0,0,0,0.1)';
+        pages.forEach((page) => {
+          const pageElement = page as HTMLElement;
+          pageElement.style.margin = '40px auto';
+          pageElement.style.padding = '60px 40px';
+          pageElement.style.position = 'relative';
+          pageElement.style.boxShadow = '0 1px 3px rgba(0,0,0,0.1)';
           
           // 隐藏页面内 footer 中的页码
-          const footer = page.querySelector('footer, .docx-footer');
+          const footer = pageElement.querySelector('footer, .docx-footer');
           if (footer) {
             const pageNumberSpans = footer.querySelectorAll('span');
             pageNumberSpans.forEach((span: HTMLElement) => {
@@ -1013,7 +1306,7 @@ export default function ContractResult() {
         }
         
         // 文档渲染完成后，应用差异高亮
-        applyDiffHighlighting(iframeDoc, containerRef === originalDocRef);
+        applyDiffHighlighting(iframeDoc, isOriginal);
         
         iframe.contentWindow?.scrollTo(0, 0);
         
@@ -1103,17 +1396,7 @@ export default function ContractResult() {
   // 处理结果项点击
   const handleResultClick = (result: ComparisonItem) => {
     setSelectedResult(result);
-    
-    // 解析位置信息，提取段落索引
-    const positionMatch = result.position.match(/第(\d+)段/);
-    if (!positionMatch) {
-      console.log('无法解析位置信息:', result.position);
-      return;
-    }
-    
-    const paragraphIndex = parseInt(positionMatch[1]) - 1;
-    
-    
+
     const originalIframe = originalIframeRef.current;
     const comparisonIframe = comparisonIframeRef.current;
     
@@ -1131,66 +1414,30 @@ export default function ContractResult() {
     }
     
     // 获取两边文档的所有段落
-    const originalParagraphs = originalDoc.querySelectorAll('.docx-paragraph, p');
-    const comparisonParagraphs = comparisonDoc.querySelectorAll('.docx-paragraph, p');
-    
-    // 根据结果类型处理定位和高亮
+    const originalParagraphs = getParagraphs(originalDoc);
+    const comparisonParagraphs = getParagraphs(comparisonDoc);
+
+    const flashParagraph = (paragraph: HTMLElement | null) => {
+      if (!paragraph) return;
+      paragraph.scrollIntoView({ behavior: 'auto', block: 'center' });
+      paragraph.classList.add('diff-current');
+      setTimeout(() => {
+        paragraph.classList.remove('diff-current');
+      }, 2000);
+    };
+
     if (result.type === 'modified') {
-      // 对于修改类型的结果，同时定位到两边文档
-      
-      // 滚动到原始文档的目标段落
-      if (paragraphIndex >= 0 && paragraphIndex < originalParagraphs.length) {
-        const originalTarget = originalParagraphs[paragraphIndex] as HTMLElement;
-        originalTarget.scrollIntoView({ behavior: 'auto', block: 'center' });
-        
-        // 高亮原始文档的目标段落
-        originalTarget.classList.add('bg-yellow-100');
-        setTimeout(() => {
-          originalTarget.classList.remove('bg-yellow-100');
-        }, 2000);
-      }
-      
-      // 滚动到对比文档的目标段落
-      if (paragraphIndex >= 0 && paragraphIndex < comparisonParagraphs.length) {
-        const comparisonTarget = comparisonParagraphs[paragraphIndex] as HTMLElement;
-        comparisonTarget.scrollIntoView({ behavior: 'auto', block: 'center' });
-        
-        // 高亮对比文档的目标段落
-        comparisonTarget.classList.add('bg-yellow-100');
-        setTimeout(() => {
-          comparisonTarget.classList.remove('bg-yellow-100');
-        }, 2000);
-      }
-    } else {
-      // 对于其他类型结果，只定位到一边文档
-      const isOriginalDoc = result.type === 'deleted';
-      
-      if (isOriginalDoc) {
-        // 处理删除类型，定位到原始文档
-        if (paragraphIndex >= 0 && paragraphIndex < originalParagraphs.length) {
-          const originalTarget = originalParagraphs[paragraphIndex] as HTMLElement;
-          originalTarget.scrollIntoView({ behavior: 'auto', block: 'center' });
-          
-          // 高亮目标段落
-          originalTarget.classList.add('bg-yellow-100');
-          setTimeout(() => {
-            originalTarget.classList.remove('bg-yellow-100');
-          }, 2000);
-        }
-      } else {
-        // 处理增加类型，定位到对比文档
-        if (paragraphIndex >= 0 && paragraphIndex < comparisonParagraphs.length) {
-          const comparisonTarget = comparisonParagraphs[paragraphIndex] as HTMLElement;
-          comparisonTarget.scrollIntoView({ behavior: 'auto', block: 'center' });
-          
-          // 高亮目标段落
-          comparisonTarget.classList.add('bg-yellow-100');
-          setTimeout(() => {
-            comparisonTarget.classList.remove('bg-yellow-100');
-          }, 2000);
-        }
-      }
+      flashParagraph(findParagraph(originalParagraphs, result.stdIndex, result.standardText));
+      flashParagraph(findParagraph(comparisonParagraphs, result.cmpIndex, result.comparisonText));
+      return;
     }
+
+    if (result.type === 'deleted') {
+      flashParagraph(findParagraph(originalParagraphs, result.stdIndex, result.standardText));
+      return;
+    }
+
+    flashParagraph(findParagraph(comparisonParagraphs, result.cmpIndex, result.comparisonText));
   };
 
   // 处理返回按钮点击
@@ -1212,9 +1459,6 @@ export default function ContractResult() {
     }
   };
 
-  // 从ContrastuploadStore获取状态管理方法
-  const { setOriginalFile, setComparisonFile } = ContrastuploadStore();
-
   // Tab 对应的路由路径
   const tabRoutes: Record<TabType, string> = {
     check: '/',
@@ -1226,24 +1470,22 @@ export default function ContractResult() {
   // 处理标签页切换
   const handleTabChange = (tab: TabType) => {
     setActiveTab(tab);
-    
-  
-    if (originalFile?.file_url) {
-      setOriginalFile({
-        title: originalFile.title,
-        file_url: originalFile.file_url,
-        file_id: originalFile.file_id
-      });
+
+    if (tab === 'contrast') {
+      localStorage.setItem('contrast_workspace_active', '1');
+      router.push('/result');
+      return;
     }
-    
-    if (comparisonFile?.file_url) {
-      setComparisonFile({
-        title: comparisonFile.title,
-        file_url: comparisonFile.file_url,
-        file_id: comparisonFile.file_id
-      });
+
+    if (
+      tab === 'check' &&
+      typeof window !== 'undefined' &&
+      window.localStorage.getItem('review_workspace_active') === '1'
+    ) {
+      router.push('/review');
+      return;
     }
-    
+
     // 跳转到对应的页面
     router.push(tabRoutes[tab]);
   };
@@ -1256,6 +1498,7 @@ export default function ContractResult() {
         onLoginClick={handleLoginClick}
         onLogoutClick={handleLogout}
         activeTab={activeTab} 
+        onTabClick={handleTabChange}
       />
       
       {/* 文档操作工具栏 */}
@@ -1271,6 +1514,11 @@ export default function ContractResult() {
           localStorage.removeItem('comparison_file_id');
           localStorage.removeItem('original_file_title');
           localStorage.removeItem('comparison_file_title');
+          localStorage.removeItem('comparison_result');
+          localStorage.removeItem('comparison_history_detail');
+          localStorage.removeItem('comparison_session_id');
+          localStorage.removeItem('comparison_pair_key');
+          localStorage.removeItem('contrast_workspace_active');
           // 跳转到对比上传页面
           router.push('/contrast');
         }}>

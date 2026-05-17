@@ -1,5 +1,5 @@
 import {getAuthToken, clearTokenInfo} from "@/utils/client";
-import {RiskResponse} from "@/lib/Interface";
+import {ReviewProgressEvent, RiskResponse} from "@/lib/Interface";
 import {authDatedHandler} from "@/utils/authDatedHandler";
 
 export type ReviewTaskCreateRequest = {
@@ -18,7 +18,8 @@ export const startTask = async (
     onError?: (error: Error) => void,
     onStreamingStart?: () => void,
     onStreamingEnd?: () => void,
-    onCompleted?: () => void
+    onCompleted?: () => void,
+    onProgress?: (event: ReviewProgressEvent) => void
 ) => {
     const token = getAuthToken();
 
@@ -57,76 +58,57 @@ export const startTask = async (
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-        let processPromise = Promise.resolve();
+        let finalized = false;
+
+        const finalizeStream = () => {
+            if (finalized) return;
+            finalized = true;
+            onStreamingEnd?.();
+            onCompleted?.();
+            onComplete?.();
+        };
+
+        const handleEventText = (eventText: string): boolean => {
+            const result = processSSEEvent(eventText, onRiskData, onProgress);
+            if (result.error) {
+                throw result.error;
+            }
+            if (result.complete) {
+                finalizeStream();
+                return true;
+            }
+            return false;
+        };
 
         try {
             while (true) {
                 const {done, value} = await reader.read();
 
                 if (done) {
-                    if (buffer.trim()) {
-                        const lines = buffer.split("\n");
-                        for (const line of lines) {
-                            const trimmedLine = line.trim();
-                            if (trimmedLine && trimmedLine.startsWith("data:")) {
-                                const dataContent = trimmedLine.slice(5).trim();
-                                if (dataContent) {
-                                    processPromise = processPromise.then(() => {
-                                        return new Promise<void>((resolve, reject) => {
-                                            requestAnimationFrame(() => {
-                                                const error = processDataLine(dataContent, onRiskData);
-                                                if (error) {
-                                                    reject(error);
-                                                    return;
-                                                }
-                                                setTimeout(resolve, 200);
-                                            });
-                                        });
-                                    });
-                                }
-                            }
-                        }
+                    const remaining = buffer + decoder.decode();
+                    if (remaining.trim()) {
+                        handleEventText(remaining);
                     }
-                    await processPromise;
-                    onStreamingEnd?.();
-                    onCompleted?.();
-                    onComplete?.();
+                    finalizeStream();
                     break;
                 }
 
                 buffer += decoder.decode(value, {stream: true});
 
-                const lines = buffer.split("\n");
-                buffer = lines.pop() || "";
+                const events = buffer.split(/\r?\n\r?\n/);
+                buffer = events.pop() || "";
 
-                for (const line of lines) {
-                    const trimmedLine = line.trim();
-
-                    if (!trimmedLine || trimmedLine.startsWith(": ping")) {
-                        continue;
-                    }
-
-                    if (trimmedLine.startsWith("data:")) {
-                        const dataContent = trimmedLine.slice(5).trim();
-                        if (dataContent) {
-                            processPromise = processPromise.then(() => {
-                                return new Promise<void>((resolve, reject) => {
-                                    requestAnimationFrame(() => {
-                                        const error = processDataLine(dataContent, onRiskData);
-                                        if (error) {
-                                            reject(error);
-                                            return;
-                                        }
-                                        setTimeout(resolve, 200);
-                                    });
-                                });
-                            });
-                        }
+                for (const eventText of events) {
+                    if (handleEventText(eventText)) {
+                        await reader.cancel().catch(() => undefined);
+                        return {connected: true};
                     }
                 }
             }
         } catch (error) {
-            onStreamingEnd?.();
+            if (!finalized) {
+                onStreamingEnd?.();
+            }
             onError?.(error as Error);
             throw error;
         }
@@ -135,12 +117,39 @@ export const startTask = async (
     return {connected: true};
 };
 
+function processSSEEvent(
+    eventText: string,
+    onRiskData?: (risk: RiskResponse) => void,
+    onProgress?: (event: ReviewProgressEvent) => void
+): { error?: Error; complete?: boolean } {
+    const dataLines = eventText
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith(":"))
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+
+    if (dataLines.length === 0) {
+        return {};
+    }
+
+    for (const dataContent of dataLines) {
+        const result = processDataLine(dataContent, onRiskData, onProgress);
+        if (result.error || result.complete) {
+            return result;
+        }
+    }
+
+    return {};
+}
+
 function processDataLine(
     dataContent: string,
-    onRiskData?: (risk: RiskResponse) => void
-): Error | undefined {
+    onRiskData?: (risk: RiskResponse) => void,
+    onProgress?: (event: ReviewProgressEvent) => void
+): { error?: Error; complete?: boolean } {
     if (!dataContent) {
-        return;
+        return {};
     }
 
     try {
@@ -148,7 +157,25 @@ function processDataLine(
 
         if (parsed.event === "error") {
             const message = parsed.data?.message || "审阅任务启动失败";
-            return new Error(message);
+            return {error: new Error(message)};
+        }
+
+        if (parsed.event === "end") {
+            return {complete: true};
+        }
+
+        if (parsed.event === "progress" && parsed.data) {
+            const progressData = parsed.data;
+            onProgress?.({
+                phase: progressData.phase || "",
+                agent: progressData.agent || "",
+                status: progressData.status || "",
+                message: progressData.message || "",
+                progress: Number(progressData.progress || 0),
+                timestamp: progressData.timestamp || "",
+                data: progressData.data,
+            });
+            return {};
         }
 
         if (parsed.event === "message" && parsed.data) {
@@ -183,155 +210,8 @@ function processDataLine(
                 onRiskData?.(riskData);
             }
         }
-    } catch (error) {
-    }
-}
-
-function processSSEData(
-    eventText: string,
-    onRiskData?: (risk: RiskResponse) => void
-) {
-    const lines = eventText.split("\n");
-    let eventType = "";
-    let dataText = "";
-
-    for (const line of lines) {
-        if (line.startsWith("event:")) {
-            eventType = line.slice(6).trim();
-        } else if (line.startsWith("data:")) {
-            const dataLine = line.slice(5).trim();
-            if (dataText) {
-                dataText += dataLine;
-            } else {
-                dataText = dataLine;
-            }
-        }
+    } catch {
     }
 
-    if (!dataText) return;
-
-    const parseJsonData = (jsonStr: string) => {
-        let startIndex = 0;
-        const results: Array<{
-            event?: string;
-            data?: unknown;
-            id?: unknown;
-            session_id?: unknown;
-            index?: unknown;
-            [key: string]: unknown;
-        }> = [];
-
-        while (startIndex < jsonStr.length) {
-            let braceCount = 0;
-            let inString = false;
-            let escapeNext = false;
-            let jsonStart = -1;
-
-            for (let i = startIndex; i < jsonStr.length; i++) {
-                const char = jsonStr[i];
-
-                if (escapeNext) {
-                    escapeNext = false;
-                    continue;
-                }
-
-                if (char === "\\") {
-                    escapeNext = true;
-                    continue;
-                }
-
-                if (char === '"') {
-                    inString = !inString;
-                    continue;
-                }
-
-                if (!inString) {
-                    if (char === "{") {
-                        if (jsonStart === -1) {
-                            jsonStart = i;
-                        }
-                        braceCount++;
-                    } else if (char === "}") {
-                        braceCount--;
-                        if (braceCount === 0 && jsonStart !== -1) {
-                            try {
-                                const jsonSubStr = jsonStr.substring(jsonStart, i + 1);
-                                const parsed = JSON.parse(jsonSubStr);
-                                results.push(parsed);
-                                startIndex = i + 1;
-                                break;
-                            } catch (e) {
-                                startIndex = i + 1;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (braceCount !== 0) {
-                break;
-            }
-        }
-
-        return results;
-    };
-
-    try {
-        const parsedObjects = parseJsonData(dataText);
-
-        parsedObjects.forEach((parsed, index) => {
-            setTimeout(() => {
-                let riskDataObj: RiskResponse | null = null;
-
-                if (parsed.event === "message" && parsed.data) {
-                    riskDataObj = parsed.data as RiskResponse;
-                } else if (parsed.event === "end") {
-                    return;
-                } else if (eventType === "message" && parsed.id && parsed.session_id) {
-                    riskDataObj = parsed as unknown as RiskResponse;
-                } else if (eventType === "message" && parsed.data) {
-                    riskDataObj = parsed.data as RiskResponse;
-                } else if (
-                    parsed.id &&
-                    parsed.session_id &&
-                    parsed.index !== undefined
-                ) {
-                    riskDataObj = parsed as unknown as RiskResponse;
-                }
-
-                if (
-                    riskDataObj &&
-                    riskDataObj.id &&
-                    riskDataObj.session_id &&
-                    riskDataObj.index !== undefined
-                ) {
-                    const isAcceptedValue = (
-                        riskDataObj as unknown as { is_accepted?: boolean | number }
-                    ).is_accepted;
-                    const isAccepted =
-                        typeof isAcceptedValue === "number"
-                            ? isAcceptedValue === 1
-                            : Boolean(isAcceptedValue);
-
-                    const riskData: RiskResponse = {
-                        id: riskDataObj.id,
-                        session_id: riskDataObj.session_id,
-                        task_id: riskDataObj.task_id,
-                        index: riskDataObj.index,
-                        original_content: riskDataObj.original_content,
-                        risk_analysis: riskDataObj.risk_analysis,
-                        risk_level: riskDataObj.risk_level,
-                        risk_type: riskDataObj.risk_type,
-                        suggested_content: riskDataObj.suggested_content,
-                        reason: riskDataObj.reason,
-                        is_accepted: isAccepted,
-                        created_at: riskDataObj.created_at,
-                    };
-                    onRiskData?.(riskData);
-                }
-            }, index * 50);
-        });
-    } catch (error) {
-    }
+    return {};
 }

@@ -32,16 +32,23 @@ func (s *Service) Create(ctx context.Context, creator string, req RiskPointReque
 
 	status := normalizeStatus(req.Status, req.IsEnabled)
 	departments, _ := json.Marshal(req.Departments)
+	keywords, _ := json.Marshal(cleanStringList(req.Keywords, 16, 32))
+	applicableClauses, _ := json.Marshal(cleanStringList(req.ApplicableClauses, 16, 64))
 	riskPoint := &RiskPoint{
-		ContractTypeID:   contractType.ID,
-		ContractTypeName: contractType.Name,
-		RiskContent:      strings.TrimSpace(req.RiskContent),
-		RiskType:         limitString(defaultString(req.RiskType, "通用风险"), 64),
-		RiskLevel:        normalizeRiskLevel(req.RiskLevel),
-		ApplicableScope:  normalizeScope(req.ApplicableScope),
-		Departments:      string(departments),
-		Creator:          limitString(creator, 64),
-		Status:           status,
+		ContractTypeID:      contractType.ID,
+		ContractTypeName:    contractType.Name,
+		RiskContent:         strings.TrimSpace(req.RiskContent),
+		RiskType:            limitString(defaultString(req.RiskType, "通用风险"), 64),
+		RiskLevel:           normalizeRiskLevel(req.RiskLevel),
+		TriggerCondition:    strings.TrimSpace(req.TriggerCondition),
+		Keywords:            string(keywords),
+		ApplicableClauses:   string(applicableClauses),
+		LegalBasis:          strings.TrimSpace(req.LegalBasis),
+		RecommendedTemplate: strings.TrimSpace(req.RecommendedTemplate),
+		ApplicableScope:     normalizeScope(req.ApplicableScope),
+		Departments:         string(departments),
+		Creator:             limitString(creator, 64),
+		Status:              status,
 	}
 	if riskPoint.RiskContent == "" {
 		return nil, errors.New("风险点内容不能为空")
@@ -79,11 +86,18 @@ func (s *Service) Update(ctx context.Context, id uint64, req RiskPointRequest) (
 	}
 
 	departments, _ := json.Marshal(req.Departments)
+	keywords, _ := json.Marshal(cleanStringList(req.Keywords, 16, 32))
+	applicableClauses, _ := json.Marshal(cleanStringList(req.ApplicableClauses, 16, 64))
 	existing.ContractTypeID = contractType.ID
 	existing.ContractTypeName = contractType.Name
 	existing.RiskContent = strings.TrimSpace(req.RiskContent)
 	existing.RiskType = limitString(defaultString(req.RiskType, "通用风险"), 64)
 	existing.RiskLevel = normalizeRiskLevel(req.RiskLevel)
+	existing.TriggerCondition = strings.TrimSpace(req.TriggerCondition)
+	existing.Keywords = string(keywords)
+	existing.ApplicableClauses = string(applicableClauses)
+	existing.LegalBasis = strings.TrimSpace(req.LegalBasis)
+	existing.RecommendedTemplate = strings.TrimSpace(req.RecommendedTemplate)
 	existing.ApplicableScope = normalizeScope(req.ApplicableScope)
 	existing.Departments = string(departments)
 	existing.Status = normalizeStatus(req.Status, req.IsEnabled)
@@ -96,16 +110,21 @@ func (s *Service) Update(ctx context.Context, id uint64, req RiskPointRequest) (
 		}
 		existing.KnowledgeDocID = docID
 		return tx.Model(&RiskPoint{}).Where("id = ?", existing.ID).Updates(map[string]interface{}{
-			"contract_type_id":   existing.ContractTypeID,
-			"contract_type_name": existing.ContractTypeName,
-			"risk_content":       existing.RiskContent,
-			"risk_type":          existing.RiskType,
-			"risk_level":         existing.RiskLevel,
-			"applicable_scope":   existing.ApplicableScope,
-			"departments":        existing.Departments,
-			"status":             existing.Status,
-			"knowledge_doc_id":   existing.KnowledgeDocID,
-			"updated_at":         existing.UpdatedAt,
+			"contract_type_id":     existing.ContractTypeID,
+			"contract_type_name":   existing.ContractTypeName,
+			"risk_content":         existing.RiskContent,
+			"risk_type":            existing.RiskType,
+			"risk_level":           existing.RiskLevel,
+			"trigger_condition":    existing.TriggerCondition,
+			"keywords":             existing.Keywords,
+			"applicable_clauses":   existing.ApplicableClauses,
+			"legal_basis":          existing.LegalBasis,
+			"recommended_template": existing.RecommendedTemplate,
+			"applicable_scope":     existing.ApplicableScope,
+			"departments":          existing.Departments,
+			"status":               existing.Status,
+			"knowledge_doc_id":     existing.KnowledgeDocID,
+			"updated_at":           existing.UpdatedAt,
 		}).Error
 	})
 	if err != nil {
@@ -242,12 +261,19 @@ func deleteKnowledgeDoc(ctx context.Context, tx *gorm.DB, docID uint64) error {
 }
 
 func buildKnowledgeContent(riskPoint *RiskPoint) string {
+	keywords := decodeStringList(riskPoint.Keywords)
+	applicableClauses := decodeStringList(riskPoint.ApplicableClauses)
 	return fmt.Sprintf(`【风险点配置】
 合同类型：%s
 风险类型：%s
 风险等级：%s
 适用范围：%s
 风险点ID：%s
+触发条件：%s
+关键词：%s
+适用条款：%s
+法律依据：%s
+推荐修改模板：%s
 
 风险内容：
 %s
@@ -259,6 +285,11 @@ func buildKnowledgeContent(riskPoint *RiskPoint) string {
 		riskPoint.RiskLevel,
 		riskPoint.ApplicableScope,
 		riskCode(riskPoint.ID),
+		defaultString(riskPoint.TriggerCondition, "未配置"),
+		strings.Join(keywords, "、"),
+		strings.Join(applicableClauses, "、"),
+		defaultString(riskPoint.LegalBasis, "未配置"),
+		defaultString(riskPoint.RecommendedTemplate, "未配置"),
 		riskPoint.RiskContent,
 		riskPoint.ContractTypeName,
 	)
@@ -269,6 +300,8 @@ func ToResponse(riskPoint *RiskPoint) RiskPointResponse {
 	if strings.TrimSpace(riskPoint.Departments) != "" {
 		_ = json.Unmarshal([]byte(riskPoint.Departments), &departments)
 	}
+	keywords := decodeStringList(riskPoint.Keywords)
+	applicableClauses := decodeStringList(riskPoint.ApplicableClauses)
 	updateDate := riskPoint.UpdatedAt.Format("2006-01-02 15:04:05")
 	statusText := "启用"
 	if riskPoint.Status == "disabled" {
@@ -287,6 +320,11 @@ func ToResponse(riskPoint *RiskPoint) RiskPointResponse {
 		RiskContent:            riskPoint.RiskContent,
 		RiskType:               riskPoint.RiskType,
 		RiskLevel:              riskPoint.RiskLevel,
+		TriggerCondition:       riskPoint.TriggerCondition,
+		Keywords:               keywords,
+		ApplicableClauses:      applicableClauses,
+		LegalBasis:             riskPoint.LegalBasis,
+		RecommendedTemplate:    riskPoint.RecommendedTemplate,
 		ContractTypeID:         riskPoint.ContractTypeID,
 		ContractType:           riskPoint.ContractTypeName,
 		ApplicableContractType: riskPoint.ContractTypeName,
@@ -351,4 +389,32 @@ func limitString(value string, max int) string {
 		return string(runes)
 	}
 	return string(runes[:max])
+}
+
+func cleanStringList(values []string, maxItems, maxLen int) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]bool)
+	for _, value := range values {
+		value = limitString(value, maxLen)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+		if maxItems > 0 && len(out) >= maxItems {
+			break
+		}
+	}
+	return out
+}
+
+func decodeStringList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return []string{}
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return []string{}
+	}
+	return cleanStringList(values, 0, 128)
 }

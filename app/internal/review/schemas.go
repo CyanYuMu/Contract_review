@@ -76,9 +76,10 @@ type ReviewResultListResponse struct {
 type SSEEvent string
 
 const (
-	SSEEventMessage SSEEvent = "message" // 消息事件
-	SSEEventError   SSEEvent = "error"   // 错误事件
-	SSEEventEnd     SSEEvent = "end"     // 结束事件
+	SSEEventMessage  SSEEvent = "message"  // 消息事件
+	SSEEventProgress SSEEvent = "progress" // 进度事件
+	SSEEventError    SSEEvent = "error"    // 错误事件
+	SSEEventEnd      SSEEvent = "end"      // 结束事件
 )
 
 // ReviewSSEResponse 审阅任务SSE流式响应
@@ -101,6 +102,17 @@ type ReviewSSEMessageData struct {
 	RiskType         string `json:"risk_type"`         // 风险类型
 	IsAccepted       bool   `json:"is_accepted"`       // 是否已采纳
 	CreatedAt        string `json:"created_at"`        // 创建时间
+}
+
+// ReviewSSEProgressData SSE进度数据
+type ReviewSSEProgressData struct {
+	Phase     string      `json:"phase"`          // 阶段
+	Agent     string      `json:"agent"`          // Agent 名称
+	Status    string      `json:"status"`         // running/completed/failed
+	Message   string      `json:"message"`        // 进度消息
+	Progress  float64     `json:"progress"`       // 0.0-1.0
+	Timestamp string      `json:"timestamp"`      // 时间
+	Data      interface{} `json:"data,omitempty"` // 附加数据
 }
 
 // ReviewSSEErrorData SSE错误数据
@@ -128,11 +140,13 @@ type ModificationItem struct {
 	SuggestedContent string `json:"suggested_content"` // 修改后内容
 	Reason           string `json:"reason"`            // 修改理由
 	RiskType         string `json:"risk_type"`         // 风险类型
+	StableKey        string `json:"-"`                 // 流式更新用稳定键
 }
 
 // ChunkResult 分块处理结果
 type ChunkResult struct {
-	Index         int                // 分块索引
-	Modifications []ModificationItem // 修改项列表
-	Error         error              // 错误信息
+	Index         int                    // 分块索引
+	Modifications []ModificationItem     // 修改项列表
+	Progress      *ReviewSSEProgressData // 进度事件
+	Error         error                  // 错误信息
 }

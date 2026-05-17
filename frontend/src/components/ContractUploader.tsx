@@ -145,6 +145,7 @@ export default function ContractUploader({
             if (fileId) {
                 localStorage.setItem("uploaded_file_id", String(fileId));
             }
+            localStorage.removeItem("review_workspace_active");
             if (file_url) {
                 localStorage.setItem("uploaded_file_url", file_url);
             }
@@ -202,6 +203,7 @@ export default function ContractUploader({
         localStorage.removeItem("uploaded_contract_type_id");
         localStorage.removeItem("uploaded_party_a");
         localStorage.removeItem("uploaded_party_b");
+        localStorage.removeItem("review_workspace_active");
     };
 
     return (

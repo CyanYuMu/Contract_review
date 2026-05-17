@@ -35,6 +35,7 @@ export default function ReviewPanel({
     const setCompleted = RiskStore((e) => e.setCompleted);
     const resetRiskData = RiskStore((e) => e.resetRiskData);
     const setSourceFileUrl = RiskStore((e) => e.setSourceFileUrl);
+    const addProgressEvent = RiskStore((e) => e.addProgressEvent);
 
     const checkHasUploadedContract = useCallback(
         (uploadDataValue?: typeof uploadData) => {
@@ -237,7 +238,11 @@ export default function ReviewPanel({
             }
 
             // 获取文件 URL
-            const fileUrl = uploadData?.file_url;
+            const fileUrl =
+                uploadData?.file_url ||
+                (typeof window !== "undefined"
+                    ? localStorage.getItem("uploaded_file_url") || undefined
+                    : undefined);
             const fileType = uploadData?.file_type;
 
             if (!fileUrl) {
@@ -260,7 +265,25 @@ export default function ReviewPanel({
 
             resetRiskData();
             // 记录当前审查对应的文档 URL
-            setSourceFileUrl(uploadData?.file_url ?? null);
+            setSourceFileUrl(fileUrl ?? null);
+            setCompleted(false);
+            setStreaming(true);
+            addProgressEvent({
+                phase: "prepare",
+                agent: "ReviewPanel",
+                status: "running",
+                message: "正在启动合同审阅...",
+                progress: 0.01,
+                timestamp: new Date().toISOString(),
+                data: {event_type: "client_start"},
+            });
+            if (typeof window !== "undefined") {
+                localStorage.setItem("review_workspace_active", "1");
+                localStorage.setItem("uploaded_file_url", fileUrl);
+                if (fileType) {
+                    localStorage.setItem("uploaded_file_type", fileType);
+                }
+            }
 
             toast.success("任务已启动", {id: startKey});
             toast.dismiss("create-task-hint");
@@ -295,8 +318,20 @@ export default function ReviewPanel({
                 },
                 () => {
                     setCompleted(true);
+                },
+                (event) => {
+                    addProgressEvent(event);
                 }
             ).catch((err) => {
+                addProgressEvent({
+                    phase: "prepare",
+                    agent: "ReviewPanel",
+                    status: "failed",
+                    message: "审阅任务启动失败",
+                    progress: 0,
+                    timestamp: new Date().toISOString(),
+                    data: {event_type: "client_error"},
+                });
                 setStreaming(false);
                 setCompleted(false);
                 const fallback = "操作失败";

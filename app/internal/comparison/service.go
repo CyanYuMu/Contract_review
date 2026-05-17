@@ -209,6 +209,7 @@ func (s *ComparisonService) buildFileInfo(c *contract.Contract) FileInfo {
 		Title:       c.Title,
 		FileType:    c.FileType,
 		FilePath:    c.FilePath,
+		FileURL:     contract.StaticFileURL(c.FilePath),
 		DownloadURL: fmt.Sprintf("/api/contract/download/%d", c.ID),
 	}
 }

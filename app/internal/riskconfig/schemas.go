@@ -2,15 +2,20 @@ package riskconfig
 
 // RiskPointRequest 新增/编辑风险点请求。
 type RiskPointRequest struct {
-	ContractTypeID   uint64   `json:"contractTypeId"`
-	ContractTypeName string   `json:"contractType"`
-	ApplicableScope  string   `json:"applicableScope"`
-	Departments      []string `json:"department"`
-	RiskContent      string   `json:"riskContent"`
-	RiskType         string   `json:"riskType"`
-	RiskLevel        string   `json:"riskLevel"`
-	Status           string   `json:"status"`
-	IsEnabled        string   `json:"isEnabled"`
+	ContractTypeID      uint64   `json:"contractTypeId"`
+	ContractTypeName    string   `json:"contractType"`
+	ApplicableScope     string   `json:"applicableScope"`
+	Departments         []string `json:"department"`
+	RiskContent         string   `json:"riskContent"`
+	RiskType            string   `json:"riskType"`
+	RiskLevel           string   `json:"riskLevel"`
+	TriggerCondition    string   `json:"triggerCondition"`
+	Keywords            []string `json:"keywords"`
+	ApplicableClauses   []string `json:"applicableClauses"`
+	LegalBasis          string   `json:"legalBasis"`
+	RecommendedTemplate string   `json:"recommendedTemplate"`
+	Status              string   `json:"status"`
+	IsEnabled           string   `json:"isEnabled"`
 }
 
 // RiskPointResponse 风险点列表/详情响应，兼容前端现有字段命名。
@@ -21,6 +26,11 @@ type RiskPointResponse struct {
 	RiskContent            string   `json:"riskContent"`
 	RiskType               string   `json:"riskType"`
 	RiskLevel              string   `json:"riskLevel"`
+	TriggerCondition       string   `json:"triggerCondition"`
+	Keywords               []string `json:"keywords"`
+	ApplicableClauses      []string `json:"applicableClauses"`
+	LegalBasis             string   `json:"legalBasis"`
+	RecommendedTemplate    string   `json:"recommendedTemplate"`
 	ContractTypeID         uint64   `json:"contractTypeId"`
 	ContractType           string   `json:"contractType"`
 	ApplicableContractType string   `json:"applicableContractType"`

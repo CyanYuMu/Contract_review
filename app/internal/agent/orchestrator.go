@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	"contract_review/app/internal/global"
+	"contract_review/app/internal/rag"
 
 	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
@@ -18,39 +20,43 @@ import (
 type ReviewOrchestrator struct {
 	llmGenerate     func(ctx context.Context, messages []*schema.Message) (*schema.Message, error)
 	clauseAgent     *ClauseAgent
-	riskAgent       *RiskAgent
+	riskAgent       *CandidateRiskAgent
 	suggestionAgent *SuggestionAgent
 	qualityGate     *QualityGate
 	config          OrchestratorConfig
 
 	// SSE 回调 — 用于实时向前端推送 Agent 执行状态
 	onProgress func(event ProgressEvent)
+	onFinding  func(finding RiskFinding)
 }
 
 // ProgressEvent 进度事件（用于 SSE 推送）
 type ProgressEvent struct {
-	Phase       string      `json:"phase"`
-	Agent       string      `json:"agent"`
-	Status      string      `json:"status"` // running/completed/failed
-	Message     string      `json:"message"`
-	Data        interface{} `json:"data,omitempty"`
-	Progress    float64     `json:"progress"` // 0.0-1.0
-	Timestamp   time.Time   `json:"timestamp"`
+	Phase     string      `json:"phase"`
+	Agent     string      `json:"agent"`
+	Status    string      `json:"status"` // running/completed/failed
+	Message   string      `json:"message"`
+	Data      interface{} `json:"data,omitempty"`
+	Progress  float64     `json:"progress"` // 0.0-1.0
+	Timestamp time.Time   `json:"timestamp"`
 }
 
 // NewReviewOrchestrator 创建审阅编排器
-// riskTools: RiskAgent 使用的工具列表（RAG检索、规则验证、合同上下文）
 // suggestionTools: SuggestionAgent 使用的工具列表（RAG检索、合同上下文）
 func NewReviewOrchestrator(
 	llmGenerate func(ctx context.Context, messages []*schema.Message) (*schema.Message, error),
-	riskTools []Tool,
+	riskRetriever *rag.RAGRetriever,
 	suggestionTools []Tool,
 	config OrchestratorConfig,
 ) *ReviewOrchestrator {
 	return &ReviewOrchestrator{
-		llmGenerate:     llmGenerate,
-		clauseAgent:     NewClauseAgent(llmGenerate, nil),
-		riskAgent:       NewRiskAgent(llmGenerate, riskTools),
+		llmGenerate: llmGenerate,
+		clauseAgent: NewClauseAgent(llmGenerate, nil),
+		riskAgent: NewCandidateRiskAgent(llmGenerate, riskRetriever, CandidateRiskConfig{
+			CandidateTopK:        config.RiskCandidateTopK,
+			ReviewBatchSize:      config.RiskReviewBatchSize,
+			MaxConcurrentBatches: config.MaxConcurrentAgents,
+		}),
 		suggestionAgent: NewSuggestionAgent(llmGenerate, suggestionTools),
 		qualityGate:     NewQualityGate(llmGenerate, DefaultReflectionConfig()),
 		config:          config,
@@ -60,6 +66,11 @@ func NewReviewOrchestrator(
 // SetProgressCallback 设置进度回调
 func (o *ReviewOrchestrator) SetProgressCallback(callback func(ProgressEvent)) {
 	o.onProgress = callback
+}
+
+// SetFindingCallback 设置风险发现回调，用于边审边向前端推送风险卡片。
+func (o *ReviewOrchestrator) SetFindingCallback(callback func(RiskFinding)) {
+	o.onFinding = callback
 }
 
 // emitProgress 发送进度事件
@@ -74,6 +85,12 @@ func (o *ReviewOrchestrator) emitProgress(phase, agent, status, message string, 
 			Progress:  progress,
 			Timestamp: time.Now(),
 		})
+	}
+}
+
+func (o *ReviewOrchestrator) emitFinding(finding RiskFinding) {
+	if o.onFinding != nil {
+		o.onFinding(finding)
 	}
 }
 
@@ -124,11 +141,65 @@ func (o *ReviewOrchestrator) ReviewContract(
 	global.Log.Info("Phase 2 完成",
 		zap.Int("clauseCount", len(clauses)))
 
-	// ============ Phase 3: 风险识别（RiskAgent × N 并发） ============
-	o.emitProgress("risk_identify", "RiskAgent", "running",
-		fmt.Sprintf("正在并发审阅 %d 个条款...", len(clauses)), 0.25, nil)
+	// ============ Phase 3: 风险识别（知识库候选驱动 DAG） ============
+	o.emitProgress("risk_identify", "CandidateRiskAgent", "running",
+		fmt.Sprintf("正在检索 %d 个条款的知识库候选风险点...", len(clauses)), 0.25, nil)
 
-	findings, riskSteps, err := o.riskAgent.ExecuteBatch(ctx, clauses, meta, o.config.MaxConcurrentAgents)
+	findings, riskSteps, err := o.riskAgent.ExecuteBatchWithCallback(
+		ctx,
+		clauses,
+		meta,
+		func(index int, clause Clause, candidates []RiskCandidate, completed int, total int) {
+			progress := 0.25
+			if total > 0 {
+				progress += 0.15 * float64(completed) / float64(total)
+			}
+			o.emitProgress("candidate_retrieve", "CandidateRiskAgent", "running",
+				fmt.Sprintf("依据命中: 条款 %d/%d，候选 %d 条", completed, total, len(candidates)),
+				progress,
+				map[string]interface{}{
+					"event_type":        "candidate_retrieved",
+					"clause_id":         clause.ID,
+					"clause_title":      clause.Title,
+					"clause_index":      index,
+					"completed":         completed,
+					"total":             total,
+					"candidate_count":   len(candidates),
+					"candidate_ids":     candidateIDs(candidates, 5),
+					"candidate_sources": candidateSources(candidates, 3),
+				})
+		},
+		func(index int, clause Clause, candidates []RiskCandidate, clauseFindings []RiskFinding, completed int, total int) {
+			progress := 0.25
+			if total > 0 {
+				progress += 0.35 * float64(completed) / float64(total)
+			}
+			data := map[string]interface{}{
+				"event_type":        "clause_reviewed",
+				"clause_id":         clause.ID,
+				"clause_title":      clause.Title,
+				"clause_index":      index,
+				"completed":         completed,
+				"total":             total,
+				"candidate_count":   len(candidates),
+				"candidate_ids":     candidateIDs(candidates, 5),
+				"candidate_sources": candidateSources(candidates, 3),
+				"finding_count":     len(clauseFindings),
+				"verified_count":    countVerified(clauseFindings),
+			}
+			o.emitProgress("risk_identify", "CandidateRiskAgent", "running",
+				fmt.Sprintf("条款审阅进度: %d/%d，候选 %d 条，本条发现 %d 个风险点", completed, total, len(candidates), len(clauseFindings)),
+				progress,
+				data)
+			for _, finding := range clauseFindings {
+				o.emitProgress("risk_identify", "CandidateRiskAgent", "running",
+					fmt.Sprintf("命中风险: %s (%s)，依据 %d 条", finding.RiskType, finding.RiskLevel, len(finding.LegalBasis)),
+					progress,
+					progressDataFromFinding(finding))
+				o.emitFinding(finding)
+			}
+		},
+	)
 	if err != nil {
 		global.Log.Error("Phase 3 风险识别失败", zap.Error(err))
 		return nil, fmt.Errorf("风险识别失败: %w", err)
@@ -142,7 +213,7 @@ func (o *ReviewOrchestrator) ReviewContract(
 		}
 	}
 
-	o.emitProgress("risk_identify", "RiskAgent", "completed",
+	o.emitProgress("risk_identify", "CandidateRiskAgent", "completed",
 		fmt.Sprintf("风险识别完成: %d 个风险点 (%d 个已验证)", len(findings), verifiedCount), 0.6,
 		map[string]int{"total": len(findings), "verified": verifiedCount})
 
@@ -155,22 +226,29 @@ func (o *ReviewOrchestrator) ReviewContract(
 	o.emitProgress("suggestion", "SuggestionAgent", "running",
 		"正在生成修改建议...", 0.65, nil)
 
-	suggestionOutput, err := o.suggestionAgent.Execute(ctx, AgentInput{
-		Task: "生成修改建议",
-		Context: map[string]interface{}{
-			"findings":      findings,
-			"clauses":       clauses,
-			"contract_meta": meta,
-		},
-	})
-	if err != nil {
-		global.Log.Warn("Phase 4 建议生成失败，使用默认建议", zap.Error(err))
+	if suggestions := suggestionsFromFindings(findings); len(suggestions) == len(findings) {
+		report.Suggestions = suggestions
+		o.emitProgress("suggestion", "CandidateRiskAgent", "completed",
+			fmt.Sprintf("修改建议随批量审阅生成完成: %d 条建议", len(report.Suggestions)), 0.8, nil)
 	} else {
-		suggestions, ok := suggestionOutput.Result.([]Suggestion)
-		if ok {
-			report.Suggestions = suggestions
+		suggestionOutput, err := o.suggestionAgent.Execute(ctx, AgentInput{
+			Task: "生成修改建议",
+			Context: map[string]interface{}{
+				"findings":      findings,
+				"clauses":       clauses,
+				"contract_meta": meta,
+			},
+		})
+		if err != nil {
+			global.Log.Warn("Phase 4 建议生成失败，使用默认建议", zap.Error(err))
+			report.Suggestions = suggestionsFromFindings(findings)
+		} else {
+			suggestions, ok := suggestionOutput.Result.([]Suggestion)
+			if ok {
+				report.Suggestions = suggestions
+			}
+			report.TokensUsed += suggestionOutput.TokensUsed
 		}
-		report.TokensUsed += suggestionOutput.TokensUsed
 	}
 
 	o.emitProgress("suggestion", "SuggestionAgent", "completed",
@@ -295,4 +373,61 @@ func generateSummary(report *ReviewReport) string {
 		highCount, midCount, lowCount, verifiedCount,
 		len(report.Suggestions), mustFix, shouldFix, optionalFix,
 		report.OverallRisk, report.QualityScore)
+}
+
+func suggestionsFromFindings(findings []RiskFinding) []Suggestion {
+	suggestions := make([]Suggestion, 0, len(findings))
+	for _, finding := range findings {
+		if strings.TrimSpace(finding.SuggestedText) == "" {
+			continue
+		}
+		reason := firstNonEmpty(finding.SuggestionReason, finding.RiskDescription)
+		legalReference := ""
+		if len(finding.LegalBasis) > 0 {
+			basis := finding.LegalBasis[0]
+			legalReference = strings.TrimSpace(fmt.Sprintf("%s %s: %s", basis.Source, basis.Article, basis.Content))
+		}
+		suggestions = append(suggestions, Suggestion{
+			RiskFindingID:  firstNonEmpty(finding.FindingID, finding.ClauseID),
+			OriginalText:   finding.OriginalText,
+			SuggestedText:  finding.SuggestedText,
+			Reason:         reason,
+			LegalReference: legalReference,
+			Impact:         "降低条款争议和履约不确定性",
+			Priority:       normalizePriority(finding.Priority, finding.RiskLevel),
+		})
+	}
+	return suggestions
+}
+
+func progressDataFromFinding(f RiskFinding) map[string]interface{} {
+	sources := make([]string, 0, len(f.LegalBasis))
+	seen := make(map[string]bool)
+	for _, basis := range f.LegalBasis {
+		source := basis.Source
+		if source == "" {
+			source = basis.Article
+		}
+		if source == "" || seen[source] {
+			continue
+		}
+		seen[source] = true
+		sources = append(sources, source)
+		if len(sources) >= 3 {
+			break
+		}
+	}
+	return map[string]interface{}{
+		"event_type":            "risk_found",
+		"finding_id":            f.FindingID,
+		"clause_id":             f.ClauseID,
+		"candidate_ids":         f.CandidateIDs,
+		"risk_type":             f.RiskType,
+		"risk_level":            f.RiskLevel,
+		"verified":              f.Verified,
+		"requires_human_review": f.RequiresHumanReview,
+		"confidence":            f.Confidence,
+		"legal_basis_count":     len(f.LegalBasis),
+		"legal_basis_sources":   sources,
+	}
 }

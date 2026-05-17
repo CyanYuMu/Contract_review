@@ -30,7 +30,7 @@ func NewRiskAgent(
 		llmGenerate: llmGenerate,
 		tools:       tools,
 		reactConfig: ReactConfig{
-			MaxIterations:     8,
+			MaxIterations:     5,
 			MinIterations:     2, // 至少调用 RAG + RuleVerifier 各一次
 			ObservationWindow: 5,
 		},
@@ -310,7 +310,7 @@ func buildRiskIdentificationPrompt(clause Clause, meta ContractMeta) string {
 1. 仔细阅读条款内容，初步识别可能的风险点
 2. 对每个风险点，调用 rag_search 工具检索相关审阅规范、法律条例和已配置风险点；调用时必须传入 contract_type="%s"
 3. 将条款内容、风险描述和检索到的规范一起提交给 rule_verifier 工具验证
-4. 只输出经过验证的风险点
+4. 输出已验证风险；如果知识库未命中但条款存在明显法律或履约风险，可以输出 verified=false 的"待人工确认风险"
 
 %s
 
@@ -330,7 +330,7 @@ func buildRiskIdentificationPrompt(clause Clause, meta ContractMeta) string {
     }
   ]
 }
-如无风险，输出 {"findings": []}。`,
+如无风险，输出 {"findings": []}。待人工确认风险必须写明为什么知识库未命中仍需人工复核。`,
 		meta.Stance, meta.PartyA, meta.PartyB, meta.ContractType,
 		meta.Stance, meta.Intensity,
 		clause.ID, clause.Title, clause.Category,
@@ -358,12 +358,23 @@ const riskAgentSystemPrompt = `你是一名资深合同审查律师，擅长识�
 - 法律适用与管辖
 
 ## 重要
-- 未经工具验证的风险标记为"待验证"
+- 未经工具验证但确有必要提示的风险标记为"待人工确认"，verified=false
 - 如果 RAG 检索无结果，如实说明"未找到对应审阅规范"
 - 不要编造法律法规条文`
 
 // ExecuteBatch 批量审阅多个条款（并发）
 func (ra *RiskAgent) ExecuteBatch(ctx context.Context, clauses []Clause, meta ContractMeta, maxConcurrent int) ([]RiskFinding, []ThinkStep, error) {
+	return ra.ExecuteBatchWithCallback(ctx, clauses, meta, maxConcurrent, nil)
+}
+
+// ExecuteBatchWithCallback 批量审阅多个条款，并在单个条款完成时回调局部结果。
+func (ra *RiskAgent) ExecuteBatchWithCallback(
+	ctx context.Context,
+	clauses []Clause,
+	meta ContractMeta,
+	maxConcurrent int,
+	onClauseResult func(index int, clause Clause, findings []RiskFinding, completed int, total int),
+) ([]RiskFinding, []ThinkStep, error) {
 	if maxConcurrent <= 0 {
 		maxConcurrent = 3
 	}
@@ -413,6 +424,10 @@ func (ra *RiskAgent) ExecuteBatch(ctx context.Context, clauses []Clause, meta Co
 				zap.Int("index", result.index),
 				zap.Error(result.err))
 			continue
+		}
+		completed := i + 1
+		if onClauseResult != nil {
+			onClauseResult(result.index, clauses[result.index], result.findings, completed, len(clauses))
 		}
 		allFindings = append(allFindings, result.findings...)
 		allSteps = append(allSteps, result.steps...)

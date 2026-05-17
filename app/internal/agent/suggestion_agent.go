@@ -78,7 +78,7 @@ func (sa *SuggestionAgent) Execute(ctx context.Context, input AgentInput) (Agent
 		return AgentOutput{}, err
 	}
 
-	suggestions := sa.extractSuggestions(output, verifiedFindings)
+	suggestions := sa.extractSuggestions(output, findings)
 
 	global.Log.Info("SuggestionAgent 完成",
 		zap.Int("suggestionCount", len(suggestions)))
@@ -222,7 +222,7 @@ func buildSuggestionPrompt(verified, unverified []RiskFinding, meta ContractMeta
 	}
 
 	if len(unverified) > 0 {
-		sb.WriteString("## 待验证的风险点（仅参考，标注为待人工复核）\n\n")
+		sb.WriteString("## 待验证的风险点（也需生成建议，但必须标注待人工复核）\n\n")
 		for i, f := range unverified {
 			sb.WriteString(fmt.Sprintf("%d. [待验证] %s - %s\n", i+1, f.RiskType, f.RiskDescription))
 		}
@@ -230,7 +230,7 @@ func buildSuggestionPrompt(verified, unverified []RiskFinding, meta ContractMeta
 	}
 
 	sb.WriteString(`## 工作步骤
-1. 对每个已验证的风险点，调用 rag_search 工具检索该类条款的标准表述或示范文本
+1. 对每个风险点，调用 rag_search 工具检索该类条款的标准表述或示范文本；待验证风险的建议中必须写明"待人工复核"
 2. 结合检索到的标准表述、合同上下文和法律依据，生成具体的修改建议
 3. 评估每条修改建议的影响范围
 

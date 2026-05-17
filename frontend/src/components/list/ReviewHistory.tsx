@@ -31,6 +31,43 @@ type Props = {
     onViewRecord?: () => void;
 };
 
+type ReviewSessionListItem = {
+    session_id?: number;
+    id?: number;
+    title?: string;
+    file_name?: string;
+    session_type?: string;
+    created_at?: string;
+    party_a?: string;
+    party_b?: string;
+    type?: string;
+    contract_type?: string;
+    status?: unknown;
+    is_accepted?: unknown;
+    file_path?: string;
+    file_id?: number;
+};
+
+type ReviewRiskListItem = {
+    id?: number;
+    risk_id?: number;
+    session_id?: number;
+    task_id?: number;
+    index?: number;
+    risk_index?: number;
+    order?: number;
+    original_content?: string;
+    original?: string;
+    risk_analysis?: string;
+    analysis?: string;
+    risk_level?: string;
+    level?: string;
+    suggested_content?: string;
+    suggestion?: string;
+    is_accepted?: unknown;
+    created_at?: string;
+};
+
 export default function ReviewHistory({ type = "Review", onTypeChange, onViewRecord }: Props) {
     const router = useRouter();
     const [filters, setFilters] = useState<ReviewFilterValues>(initialFilters);
@@ -101,14 +138,24 @@ export default function ReviewHistory({ type = "Review", onTypeChange, onViewRec
                     page_size: pageSize,
                     session_type: "review",
                 });
-                const list = res?.data?.sessions ?? [];
-                const totalCount = res?.data?.total ?? list.length;
+                const responseData = res?.data ?? res;
+                const listData =
+                    responseData?.sessions ??
+                    responseData?.data?.sessions ??
+                    responseData?.data?.data?.sessions ??
+                    [];
+                const list: ReviewSessionListItem[] = Array.isArray(listData) ? listData : [];
+                const totalCount =
+                    responseData?.total ??
+                    responseData?.data?.total ??
+                    responseData?.data?.data?.total ??
+                    list.length;
                 const normalized = normalize(
-                    list.map((item: any, idx: number) => ({
+                    list.map((item, idx) => ({
                         id: item.session_id ?? item.id ?? idx + 1,
                         title: item.title || item.file_name || "未命名合同",
-                        session_type: item.session_type,
-                        created_at: item.created_at,
+                        session_type: item.session_type || "review",
+                        created_at: item.created_at || "",
                         partyA: item.party_a || "未明确",
                         partyB: item.party_b || "未明确",
                         type: item.type || item.contract_type || "未明确",
@@ -147,7 +194,7 @@ export default function ReviewHistory({ type = "Review", onTypeChange, onViewRec
     const rowSelection: TableProps<historyType>["rowSelection"] = {
         type: "checkbox",
         selectedRowKeys,
-        onChange: (keys, rows) => {
+        onChange: (keys) => {
             setSelectedRowKeys(keys);
         },
     };
@@ -239,7 +286,7 @@ export default function ReviewHistory({ type = "Review", onTypeChange, onViewRec
 
     const normalizeRiskList = (raw: unknown, sessionId: number): RiskResponse[] => {
         if (!Array.isArray(raw)) return [];
-        return raw.map((item: any, idx: number) => {
+        return (raw as ReviewRiskListItem[]).map((item, idx) => {
             const isAcceptedValue = item.is_accepted;
             const isAccepted =
                 typeof isAcceptedValue === "number"
@@ -303,6 +350,10 @@ export default function ReviewHistory({ type = "Review", onTypeChange, onViewRec
         localStorage.setItem("uploaded_file_title", payload.title ?? "");
         localStorage.setItem("uploaded_party_a", payload.party_a ?? "");
         localStorage.setItem("uploaded_party_b", payload.party_b ?? "");
+        localStorage.setItem("review_workspace_active", "1");
+        if (sessionId) {
+            localStorage.setItem("review_session_id", String(sessionId));
+        }
 
         onViewRecord?.();
         router.push("/review");

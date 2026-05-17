@@ -330,93 +330,116 @@ func ExtractParagraphsFromDOCX(filePath string) ([]string, error) {
 
 // parseDocxXMLToParagraphs 解析DOCX XML提取段落列表（包括表格）
 func parseDocxXMLToParagraphs(xmlData []byte) ([]string, error) {
-
-	// 定义XML结构
-	type Text struct {
-		XMLName xml.Name `xml:"t"`
-		Content string   `xml:",chardata"`
-	}
-
-	type Run struct {
-		XMLName xml.Name `xml:"r"`
-		Texts   []Text   `xml:"t"`
-	}
-
-	type Paragraph struct {
-		XMLName xml.Name `xml:"p"`
-		Runs    []Run    `xml:"r"`
-	}
-
-	type TableCell struct {
-		XMLName    xml.Name    `xml:"tc"`
-		Paragraphs []Paragraph `xml:"p"`
-	}
-
-	type TableRow struct {
-		XMLName xml.Name    `xml:"tr"`
-		Cells   []TableCell `xml:"tc"`
-	}
-
-	type Table struct {
-		XMLName xml.Name   `xml:"tbl"`
-		Rows    []TableRow `xml:"tr"`
-	}
-
-	type Body struct {
-		XMLName    xml.Name    `xml:"body"`
-		Paragraphs []Paragraph `xml:"p"`
-		Tables     []Table     `xml:"tbl"`
-	}
-
-	type Document struct {
-		XMLName xml.Name `xml:"document"`
-		Body    Body     `xml:"body"`
-	}
-
-	var doc Document
 	decoder := xml.NewDecoder(bytes.NewReader(xmlData))
 	decoder.Strict = false
 
-	if err := decoder.Decode(&doc); err != nil {
-		return extractParagraphsByRegex(xmlData), nil
-	}
-
 	var lines []string
+	var paragraphBuilder strings.Builder
+	var cellBuilder strings.Builder
+	var rowCells []string
 
-	// 提取普通段落
-	for _, para := range doc.Body.Paragraphs {
-		var textBuilder strings.Builder
-		for _, run := range para.Runs {
-			for _, t := range run.Texts {
-				textBuilder.WriteString(t.Content)
-			}
-		}
-		text := strings.TrimSpace(textBuilder.String())
+	inBody := false
+	inTable := false
+	inCell := false
+	inParagraph := false
+	inText := false
+
+	appendLine := func(text string) {
+		text = strings.TrimSpace(text)
 		if text != "" {
 			lines = append(lines, text)
 		}
 	}
 
-	// 提取表格内容
-	for _, table := range doc.Body.Tables {
-		for _, row := range table.Rows {
-			var cellTexts []string
-			for _, cell := range row.Cells {
-				var cellBuilder strings.Builder
-				for _, para := range cell.Paragraphs {
-					for _, run := range para.Runs {
-						for _, t := range run.Texts {
-							cellBuilder.WriteString(t.Content)
-						}
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return extractParagraphsByRegex(xmlData), nil
+		}
+
+		switch t := token.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "body":
+				inBody = true
+			case "tbl":
+				if inBody {
+					inTable = true
+				}
+			case "tr":
+				if inTable {
+					rowCells = nil
+				}
+			case "tc":
+				if inTable {
+					inCell = true
+					cellBuilder.Reset()
+				}
+			case "p":
+				if inBody {
+					inParagraph = true
+					if !inTable {
+						paragraphBuilder.Reset()
 					}
 				}
-				cellText := strings.TrimSpace(cellBuilder.String())
-				if cellText != "" {
-					cellTexts = append(cellTexts, cellText)
+			case "t":
+				if inParagraph {
+					inText = true
+				}
+			case "tab":
+				if inParagraph {
+					if inCell {
+						cellBuilder.WriteRune('\t')
+					} else if !inTable {
+						paragraphBuilder.WriteRune('\t')
+					}
+				}
+			case "br":
+				if inParagraph {
+					if inCell {
+						cellBuilder.WriteRune(' ')
+					} else if !inTable {
+						paragraphBuilder.WriteRune(' ')
+					}
 				}
 			}
-			if len(cellTexts) > 0 {
-				lines = append(lines, strings.Join(cellTexts, "\t"))
+		case xml.CharData:
+			if inText {
+				if inCell {
+					cellBuilder.Write([]byte(t))
+				} else if !inTable {
+					paragraphBuilder.Write([]byte(t))
+				}
+			}
+		case xml.EndElement:
+			switch t.Name.Local {
+			case "t":
+				inText = false
+			case "p":
+				if inParagraph && !inTable {
+					appendLine(paragraphBuilder.String())
+				}
+				inParagraph = false
+			case "tc":
+				if inCell {
+					cellText := strings.TrimSpace(cellBuilder.String())
+					if cellText != "" {
+						rowCells = append(rowCells, cellText)
+					}
+				}
+				inCell = false
+			case "tr":
+				if len(rowCells) > 0 {
+					lines = append(lines, strings.Join(rowCells, "\t"))
+				}
+				rowCells = nil
+			case "tbl":
+				inTable = false
+			case "body":
+				inBody = false
 			}
 		}
 	}

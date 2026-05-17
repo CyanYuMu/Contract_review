@@ -199,7 +199,7 @@ func (h *ComparisonHandler) DeleteComparisonTask(ctx context.Context, c *app.Req
 // taskToItem 将ComparisonTask转换为列表项
 func (h *ComparisonHandler) taskToItem(task *ComparisonTask) ComparisonTaskItem {
 	completedAt := ""
-	if !task.CompletedAt.IsZero() {
+	if task.CompletedAt != nil && !task.CompletedAt.IsZero() {
 		completedAt = task.CompletedAt.Format("2006-01-02 15:04:05")
 	}
 

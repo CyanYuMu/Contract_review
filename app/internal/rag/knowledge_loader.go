@@ -21,8 +21,12 @@ func LoadKnowledgeChunksFromDB(ctx context.Context, db *gorm.DB) ([]Chunk, error
 	out := make([]Chunk, 0, len(rows))
 	for _, row := range rows {
 		docIDStr := fmt.Sprintf("%d", row.DocID)
+		chunkID := fmt.Sprintf("ck-%d", row.ChunkID)
+		if row.VectorID != "" {
+			chunkID = row.VectorID
+		}
 		out = append(out, Chunk{
-			ID:      fmt.Sprintf("ck-%d", row.ChunkID),
+			ID:      chunkID,
 			DocID:   docIDStr,
 			Content: row.Content,
 			Metadata: map[string]string{
@@ -31,6 +35,7 @@ func LoadKnowledgeChunksFromDB(ctx context.Context, db *gorm.DB) ([]Chunk, error
 				"sub_category": row.SubCat,
 				"source":       row.Source,
 				"chunk_index":  fmt.Sprintf("%d", row.ChunkIndex),
+				"vector_id":    row.VectorID,
 			},
 		})
 	}

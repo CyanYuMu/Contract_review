@@ -84,7 +84,7 @@ func (s *SessionService) ListSessions(ctx context.Context, userID uint64, req *L
 	switch req.SessionType {
 	case SessionTypeReview:
 		return s.listReviewSessions(ctx, userID, offset, req.PageSize)
-	case SessionTypeCompare:
+	case SessionTypeCompare, SessionTypeCompareLegacy:
 		return s.listCompareSessions(ctx, userID, offset, req.PageSize)
 	default:
 		return nil, 0, fmt.Errorf("无效的会话类型: %s", req.SessionType)
@@ -101,16 +101,17 @@ func (s *SessionService) listReviewSessions(ctx context.Context, userID uint64, 
 	var response []ReviewSessionResponse
 	for _, sess := range sessions {
 		response = append(response, ReviewSessionResponse{
-			SessionID:   uint64(sess.ID),
-			Title:       sess.Title,
-			SessionType: sess.SessionType,
-			FileID:      uint64(sess.FileID),
-			CreatedAt:   sess.CreatedAt.Format("2006-01-02 15:04:05"),
-			PartyA:      sess.PartyA,
-			PartyB:      sess.PartyB,
-			FileName:    sess.FileName,
-			FilePath:    sess.FilePath,
-			IsAccepted:  sess.IsAccepted,
+			SessionID:    uint64(sess.ID),
+			Title:        sess.Title,
+			SessionType:  sess.SessionType,
+			FileID:       uint64(sess.FileID),
+			CreatedAt:    sess.CreatedAt.Format("2006-01-02 15:04:05"),
+			PartyA:       sess.PartyA,
+			PartyB:       sess.PartyB,
+			FileName:     sess.FileName,
+			FilePath:     sess.FilePath,
+			IsAccepted:   sess.IsAccepted,
+			ContractType: sess.ContractType,
 		})
 	}
 
@@ -190,7 +191,7 @@ func (s *SessionService) DeleteSession(ctx context.Context, userID, sessionID ui
 		if err := s.deleteReviewRelatedData(ctx, session.ID); err != nil {
 			global.Log.Warn("删除审阅关联数据失败", zap.Error(err))
 		}
-	case SessionTypeCompare:
+	case SessionTypeCompare, SessionTypeCompareLegacy:
 		if err := s.db.WithContext(ctx).Exec("DELETE FROM comparison_tasks WHERE session_id = ?", session.ID).Error; err != nil {
 			global.Log.Warn("删除比对关联数据失败", zap.Error(err))
 		}
@@ -226,7 +227,7 @@ func (s *SessionService) GetSessionHistoryDetail(ctx context.Context, sessionID 
 	switch session.SessionType {
 	case SessionTypeReview:
 		data, err = s.getReviewHistoryData(ctx, session)
-	case SessionTypeCompare:
+	case SessionTypeCompare, SessionTypeCompareLegacy:
 		data, err = s.getCompareHistoryData(ctx, session)
 	default:
 		data = nil

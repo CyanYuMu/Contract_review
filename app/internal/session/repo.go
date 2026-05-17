@@ -154,9 +154,11 @@ func (r *SessionRepo) ListReviewSessionsWithFileInfo(ctx context.Context, userID
 		Table("sessions s").
 		Select(`
 			s.id, s.user_id, s.title, s.session_type, s.file_id, s.created_at, s.updated_at,
-			c.party_a, c.party_b, c.title as file_name, c.file_path, c.is_accepted
+			c.party_a, c.party_b, c.title as file_name, c.file_path, c.is_accepted,
+			rt.contract_type
 		`).
 		Joins("LEFT JOIN contracts c ON s.file_id = c.id").
+		Joins("LEFT JOIN review_tasks rt ON rt.session_id = s.id AND rt.id = (SELECT MAX(id) FROM review_tasks WHERE session_id = s.id)").
 		Where("s.user_id = ? AND s.session_type = ?", userID, SessionTypeReview).
 		Order("s.created_at DESC").
 		Offset(offset).
@@ -178,7 +180,7 @@ func (r *SessionRepo) ListCompareSessionsWithInfo(ctx context.Context, userID ui
 
 	// 统计总数
 	if err := r.db.WithContext(ctx).Model(&Session{}).
-		Where("user_id = ? AND session_type = ?", userID, SessionTypeCompare).
+		Where("user_id = ? AND session_type IN ?", userID, []string{SessionTypeCompare, SessionTypeCompareLegacy}).
 		Count(&count).Error; err != nil {
 		global.Log.Error("SessionRepo.ListCompareSessionsWithInfo count failed", zap.Error(err))
 		return nil, 0, err
@@ -196,7 +198,7 @@ func (r *SessionRepo) ListCompareSessionsWithInfo(ctx context.Context, userID ui
 		Joins("LEFT JOIN comparison_tasks ct ON ct.session_id = s.id").
 		Joins("LEFT JOIN contracts c1 ON c1.id = ct.standard_file_id").
 		Joins("LEFT JOIN contracts c2 ON c2.id = ct.comparison_file_id").
-		Where("s.user_id = ? AND s.session_type = ?", userID, SessionTypeCompare).
+		Where("s.user_id = ? AND s.session_type IN ?", userID, []string{SessionTypeCompare, SessionTypeCompareLegacy}).
 		Order("s.created_at DESC").
 		Offset(offset).
 		Limit(limit).

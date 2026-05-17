@@ -1,6 +1,6 @@
 'use client';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { message, Spin } from 'antd';
+import { Button, message, Spin } from 'antd';
 import { LoadingOutlined } from '@ant-design/icons';
 import type { Editor } from '@/lib/canvas-editor/editor';
 import ContractContrastUploader, { type UploadedContrastFile } from '@/components/ContractContrastUploader';
@@ -29,31 +29,39 @@ export default function ContractContrastPanel({ editor: _editor }: ContractContr
   const setData = UploadStore((state) => state.setData);
   const { originalFile: storeOriginalFile, comparisonFile: storeComparisonFile } = ContrastuploadStore();
 
+  const mergeUploadData = useCallback((partialData: Parameters<typeof setData>[0]) => {
+    const currentUploadData = UploadStore.getState().data;
+    setData({
+      ...currentUploadData,
+      ...(partialData || {})
+    });
+  }, [setData]);
+
   const syncOriginalFile = useCallback((file: ContrastFileState) => {
     originalFileRef.current = { ...originalFileRef.current, ...file };
     setOriginalFileName(originalFileRef.current.title || null);
     setOriginalFileId(originalFileRef.current.file_id || null);
 
-    setData({
+    mergeUploadData({
       original_file_url: originalFileRef.current.file_url,
       original_file_title: originalFileRef.current.title,
       original_file_type: originalFileRef.current.file_type,
       original_file_id: originalFileRef.current.file_id
     });
-  }, [setData]);
+  }, [mergeUploadData]);
 
   const syncComparisonFile = useCallback((file: ContrastFileState) => {
     comparisonFileRef.current = { ...comparisonFileRef.current, ...file };
     setComparisonFileName(comparisonFileRef.current.title || null);
     setComparisonFileId(comparisonFileRef.current.file_id || null);
 
-    setData({
+    mergeUploadData({
       comparison_file_url: comparisonFileRef.current.file_url,
       comparison_file_title: comparisonFileRef.current.title,
       comparison_file_type: comparisonFileRef.current.file_type,
       comparison_file_id: comparisonFileRef.current.file_id
     });
-  }, [setData]);
+  }, [mergeUploadData]);
 
   // 从store中同步持久化的数据到本地state
   useEffect(() => {
@@ -72,20 +80,16 @@ export default function ContractContrastPanel({ editor: _editor }: ContractContr
   const handleOriginalUploadSuccess = (file: UploadedContrastFile) => {
     console.log('原始文件上传成功:', file);
     syncOriginalFile(file);
-    
+    startedKeyRef.current = null;
     message.success('标准文档上传成功');
-    
-    startComparison(file.file_id, comparisonFileRef.current.file_id, file.title, comparisonFileRef.current.title);
   };
 
   // 处理对比文件上传成功
   const handleComparisonUploadSuccess = (file: UploadedContrastFile) => {
     console.log('对比文件上传成功:', file);
     syncComparisonFile(file);
-    
+    startedKeyRef.current = null;
     message.success('对比文档上传成功');
-    
-    startComparison(originalFileRef.current.file_id, file.file_id, originalFileRef.current.title, file.title);
   };
 
   // 启动对比任务
@@ -102,7 +106,23 @@ export default function ContractContrastPanel({ editor: _editor }: ContractContr
       return;
     }
     const taskKey = `${standardId}:${comparisonId}`;
-    if (isComparingRef.current || startedKeyRef.current === taskKey) {
+    if (
+      typeof window !== 'undefined' &&
+      localStorage.getItem('contrast_workspace_active') === '1' &&
+      localStorage.getItem('comparison_pair_key') === taskKey &&
+      localStorage.getItem('comparison_result')
+    ) {
+      router.push('/result');
+      return;
+    }
+
+    if (isComparingRef.current) {
+      message.info('比对任务正在启动，请稍候');
+      return;
+    }
+
+    if (startedKeyRef.current === taskKey) {
+      message.info('当前两份合同已提交比对，请稍候');
       return;
     }
     isComparingRef.current = true;
@@ -117,9 +137,16 @@ export default function ContractContrastPanel({ editor: _editor }: ContractContr
       const result = await startComparisonTask(standardId, comparisonId, comparisonTitle);
       
       console.log('对比任务接口调用成功:', result);
+      const resultPayload = result?.data ?? result;
+      const sessionId = resultPayload?.session_id;
       
       // 保存对比结果到localStorage，供结果页面使用
-      localStorage.setItem('comparison_result', JSON.stringify(result));
+      localStorage.setItem('comparison_result', JSON.stringify(resultPayload));
+      localStorage.setItem('comparison_pair_key', taskKey);
+      localStorage.setItem('contrast_workspace_active', '1');
+      if (sessionId) {
+        localStorage.setItem('comparison_session_id', String(sessionId));
+      }
       
       message.destroy();
       message.success('对比任务启动成功');
@@ -139,13 +166,7 @@ export default function ContractContrastPanel({ editor: _editor }: ContractContr
     }
   }, [comparisonFileId, comparisonFileName, originalFileId, originalFileName, router]);
 
-  // 监听两个文件都上传成功的情况
-  useEffect(() => {
-    if (originalFileId && comparisonFileId && originalFileName && comparisonFileName) {
-      console.log('检测到两个文件都已上传，自动启动对比任务');
-      startComparison(originalFileId, comparisonFileId, originalFileName, comparisonFileName);
-    }
-  }, [originalFileId, comparisonFileId, originalFileName, comparisonFileName, startComparison]);
+  const canStartComparison = Boolean(originalFileId && comparisonFileId);
 
 
 return (
@@ -182,6 +203,20 @@ return (
         <div className="flex-1 flex flex-col items-center justify-center">
           <ContractContrastUploader onUploadSuccess={handleComparisonUploadSuccess} label="对比文档" isOriginal={false} />
         </div>
+      </div>
+      <div className="absolute bottom-8 left-1/2 -translate-x-1/2">
+        <Button
+          type="primary"
+          size="large"
+          disabled={!canStartComparison}
+          loading={isComparing}
+          onClick={() => {
+            void startComparison();
+          }}
+          className="!h-11 !px-10 !rounded-[5px] !bg-[#2260f2]"
+        >
+          {canStartComparison ? '开始比对' : '请先上传两份合同'}
+        </Button>
       </div>
    </div>
    

@@ -4,6 +4,7 @@ import (
 	"context"
 	"contract_review/app/internal/global"
 	"errors"
+	"fmt"
 	"time"
 
 	"go.uber.org/zap"
@@ -23,7 +24,7 @@ func (r *ComparisonRepo) Create(ctx context.Context, task *ComparisonTask) error
 	err := r.db.WithContext(ctx).Create(task).Error
 	if err != nil {
 		global.Log.Error("ComparisonRepo.Create failed", zap.Error(err))
-		return errors.New("create comparison task failed")
+		return fmt.Errorf("create comparison task failed: %w", err)
 	}
 	return nil
 }

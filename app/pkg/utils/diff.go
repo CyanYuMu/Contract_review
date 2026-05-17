@@ -28,45 +28,70 @@ type OpCode struct {
 
 // GetOpcodes 获取操作序列
 func (sm *SequenceMatcher) GetOpcodes() []OpCode {
-	sm.findLongestMatches()
+	m, n := len(sm.a), len(sm.b)
+	dp := make([][]int, m+1)
+	for i := range dp {
+		dp[i] = make([]int, n+1)
+	}
 
-	var opcodes []OpCode
-	i, j := 0, 0
-
-	for _, m := range sm.matching {
-		aIndex, bIndex := m[0], m[1]
-
-		matchLen := 0
-		for aIndex+matchLen < len(sm.a) && bIndex+matchLen < len(sm.b) &&
-			sm.a[aIndex+matchLen] == sm.b[bIndex+matchLen] {
-			matchLen++
-		}
-
-		if aIndex > i {
-			if bIndex > j {
-				opcodes = append(opcodes, OpCode{Tag: "replace", I1: i, I2: aIndex, J1: j, J2: bIndex})
+	for i := m - 1; i >= 0; i-- {
+		for j := n - 1; j >= 0; j-- {
+			if sm.a[i] == sm.b[j] {
+				dp[i][j] = dp[i+1][j+1] + 1
 			} else {
-				opcodes = append(opcodes, OpCode{Tag: "delete", I1: i, I2: aIndex, J1: j, J2: j})
+				dp[i][j] = maxInt(dp[i+1][j], dp[i][j+1])
 			}
-		} else if bIndex > j {
-			opcodes = append(opcodes, OpCode{Tag: "insert", I1: i, I2: i, J1: j, J2: bIndex})
-		}
-
-		if matchLen > 0 {
-			opcodes = append(opcodes, OpCode{Tag: "equal", I1: aIndex, I2: aIndex + matchLen, J1: bIndex, J2: bIndex + matchLen})
-			i = aIndex + matchLen
-			j = bIndex + matchLen
 		}
 	}
 
-	if i < len(sm.a) || j < len(sm.b) {
-		if i < len(sm.a) && j < len(sm.b) {
-			opcodes = append(opcodes, OpCode{Tag: "replace", I1: i, I2: len(sm.a), J1: j, J2: len(sm.b)})
-		} else if i < len(sm.a) {
-			opcodes = append(opcodes, OpCode{Tag: "delete", I1: i, I2: len(sm.a), J1: j, J2: j})
-		} else if j < len(sm.b) {
-			opcodes = append(opcodes, OpCode{Tag: "insert", I1: i, I2: i, J1: j, J2: len(sm.b)})
+	var opcodes []OpCode
+	appendOpcode := func(op OpCode) {
+		if op.I1 == op.I2 && op.J1 == op.J2 {
+			return
 		}
+		lastIdx := len(opcodes) - 1
+		if lastIdx >= 0 {
+			last := &opcodes[lastIdx]
+			if last.Tag == op.Tag && last.I2 == op.I1 && last.J2 == op.J1 {
+				last.I2 = op.I2
+				last.J2 = op.J2
+				return
+			}
+		}
+		opcodes = append(opcodes, op)
+	}
+
+	i, j := 0, 0
+	for i < m || j < n {
+		if i < m && j < n && sm.a[i] == sm.b[j] {
+			startI, startJ := i, j
+			for i < m && j < n && sm.a[i] == sm.b[j] {
+				i++
+				j++
+			}
+			appendOpcode(OpCode{Tag: "equal", I1: startI, I2: i, J1: startJ, J2: j})
+			continue
+		}
+
+		startI, startJ := i, j
+		for i < m || j < n {
+			if i < m && j < n && sm.a[i] == sm.b[j] {
+				break
+			}
+			if j < n && (i == m || dp[i][j+1] >= dp[i+1][j]) {
+				j++
+			} else if i < m {
+				i++
+			}
+		}
+
+		tag := "replace"
+		if startI == i {
+			tag = "insert"
+		} else if startJ == j {
+			tag = "delete"
+		}
+		appendOpcode(OpCode{Tag: tag, I1: startI, I2: i, J1: startJ, J2: j})
 	}
 
 	return opcodes
@@ -129,7 +154,13 @@ func (sm *SequenceMatcher) Ratio() float64 {
 		return 1.0
 	}
 
-	matches := len(sm.matching)
+	matcher := NewSequenceMatcher(sm.a, sm.b)
+	matches := 0
+	for _, op := range matcher.GetOpcodes() {
+		if op.Tag == "equal" {
+			matches += op.I2 - op.I1
+		}
+	}
 	total := len(sm.a) + len(sm.b)
 	if total == 0 {
 		return 1.0

@@ -3,9 +3,10 @@ package session
 import "time"
 
 const (
-	SessionTypeReview  = "review"
-	SessionTypeCompare = "compare"
-	SessionTypeChat    = "chat"
+	SessionTypeReview        = "review"
+	SessionTypeCompare       = "compare"
+	SessionTypeCompareLegacy = "comparison"
+	SessionTypeChat          = "chat"
 )
 
 // Session 任务会话表
@@ -27,11 +28,12 @@ func (Session) TableName() string {
 // SessionWithFileInfo 带文件信息的会话（用于审阅类型）
 type SessionWithFileInfo struct {
 	Session
-	PartyA     string `gorm:"column:party_a" json:"party_a"`
-	PartyB     string `gorm:"column:party_b" json:"party_b"`
-	FileName   string `gorm:"column:file_name" json:"file_name"`
-	FilePath   string `gorm:"column:file_path" json:"file_path"`
-	IsAccepted bool   `gorm:"column:is_accepted" json:"is_accepted"`
+	PartyA       string `gorm:"column:party_a" json:"party_a"`
+	PartyB       string `gorm:"column:party_b" json:"party_b"`
+	FileName     string `gorm:"column:file_name" json:"file_name"`
+	FilePath     string `gorm:"column:file_path" json:"file_path"`
+	IsAccepted   bool   `gorm:"column:is_accepted" json:"is_accepted"`
+	ContractType string `gorm:"column:contract_type" json:"contract_type"`
 }
 
 // SessionWithCompareInfo 带比对信息的会话（用于比对类型）

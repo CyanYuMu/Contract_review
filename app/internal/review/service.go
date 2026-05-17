@@ -3,18 +3,21 @@ package review
 import (
 	"context"
 	"contract_review/app/internal/agent"
+	"contract_review/app/internal/contract"
 	"contract_review/app/internal/global"
 	"contract_review/app/internal/llm"
 	"contract_review/app/internal/middleware/redis"
 	"contract_review/app/internal/rag"
 	"contract_review/app/internal/tools"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	fmodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
@@ -30,14 +33,20 @@ type SessionQuerier interface {
 
 // ReviewService 审阅服务
 type ReviewService struct {
-	reviewRepo       *ReviewRepo
-	reviewResultRepo *ReviewResultRepo
-	db               *gorm.DB
-	cache            *redis.RedisClient
-	llm              fmodel.BaseChatModel
-	orchestrator     *agent.ReviewOrchestrator
-	basePrompt       string
-	contractPrompts  map[string]string
+	reviewRepo        *ReviewRepo
+	reviewResultRepo  *ReviewResultRepo
+	db                *gorm.DB
+	cache             *redis.RedisClient
+	llm               fmodel.BaseChatModel
+	orchestrator      *agent.ReviewOrchestrator
+	basePrompt        string
+	contractPrompts   map[string]string
+	vectorComponentMu sync.Mutex
+	vectorStore       rag.VectorStore
+	vectorEmbedder    rag.EmbeddingModel
+	vectorConfigKey   string
+	vectorIndexMu     sync.Mutex
+	vectorIndexHashes map[string]string
 }
 
 // NewReviewService 创建审阅服务
@@ -48,11 +57,12 @@ func NewReviewService(
 	cache *redis.RedisClient,
 ) *ReviewService {
 	return &ReviewService{
-		reviewRepo:       reviewRepo,
-		reviewResultRepo: reviewResultRepo,
-		db:               db,
-		cache:            cache,
-		contractPrompts:  make(map[string]string),
+		reviewRepo:        reviewRepo,
+		reviewResultRepo:  reviewResultRepo,
+		db:                db,
+		cache:             cache,
+		contractPrompts:   make(map[string]string),
+		vectorIndexHashes: make(map[string]string),
 	}
 }
 
@@ -198,6 +208,11 @@ func (s *ReviewService) DeleteReviewTask(ctx context.Context, taskID uint64) err
 // CreateReviewResult 创建审阅结果
 func (s *ReviewService) CreateReviewResult(ctx context.Context, result *ReviewResult) error {
 	return s.reviewResultRepo.Create(ctx, result)
+}
+
+// UpdateReviewResult 更新审阅结果
+func (s *ReviewService) UpdateReviewResult(ctx context.Context, result *ReviewResult) error {
+	return s.reviewResultRepo.Update(ctx, result)
 }
 
 // GetReviewResults 获取审阅结果列表
@@ -617,14 +632,17 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 
 	keywordIndex := rag.NewSimpleKeywordIndex()
 	retrieverConfig := rag.DefaultRetrieverConfig()
+	retrieverConfig.FinalTopK = 8
 	// RRF 融合后的分数天然较小，仅关键词通道不再用固定阈值过滤，避免中文命中被误删。
 	retrieverConfig.MinRelevance = 0
 
+	var knowledgeChunks []rag.Chunk
 	if global.DB != nil {
 		chunks, loadErr := rag.LoadKnowledgeChunksFromDB(ctx, global.DB)
 		if loadErr != nil {
 			global.Log.Warn("加载审阅知识库失败，rag_search 将无检索结果", zap.Error(loadErr))
 		} else if len(chunks) > 0 {
+			knowledgeChunks = chunks
 			if err := keywordIndex.Index(chunks); err != nil {
 				global.Log.Warn("审阅知识库入索引失败", zap.Error(err))
 			} else {
@@ -637,28 +655,184 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 		global.Log.Warn("global.DB 未初始化，跳过审阅知识库加载")
 	}
 	if len(keywordIndex.SearchableChunks()) == 0 {
-		if err := keywordIndex.Index(defaultReviewKnowledgeChunks()); err != nil {
+		knowledgeChunks = defaultReviewKnowledgeChunks()
+		if err := keywordIndex.Index(knowledgeChunks); err != nil {
 			global.Log.Warn("内置审阅知识入索引失败", zap.Error(err))
 		} else {
 			global.Log.Warn("使用内置审阅知识兜底；建议执行 docs/sql/review_knowledge.sql 写入数据库知识库")
 		}
 	}
 
-	// 向量检索需配置 VectorStore + EmbeddingModel（如 Milvus）；当前为 nil 时仅走关键词索引
-	ragRetriever := rag.NewRAGRetriever(nil, keywordIndex, nil, retrieverConfig)
+	vectorStore, embedder := s.initVectorRetrieval(ctx, knowledgeChunks)
+	ragRetriever := rag.NewRAGRetriever(vectorStore, keywordIndex, embedder, retrieverConfig)
 
 	ragSearchTool := tools.NewRAGSearchTool(ragRetriever)
-	ruleVerifierTool := tools.NewRuleVerifierTool(llmGenerate)
 	contractContextTool := tools.NewContractContextTool(agent.ContractMeta{}, "")
 
-	riskTools := []agent.Tool{ragSearchTool, ruleVerifierTool, contractContextTool}
 	suggestionTools := []agent.Tool{ragSearchTool, contractContextTool}
 
 	orchConfig := agent.DefaultOrchestratorConfig()
-	s.orchestrator = agent.NewReviewOrchestrator(llmGenerate, riskTools, suggestionTools, orchConfig)
+	s.orchestrator = agent.NewReviewOrchestrator(llmGenerate, ragRetriever, suggestionTools, orchConfig)
 
 	global.Log.Info("Agent 编排器初始化完成")
 	return nil
+}
+
+func (s *ReviewService) initVectorRetrieval(ctx context.Context, chunks []rag.Chunk) (rag.VectorStore, rag.EmbeddingModel) {
+	if global.Config == nil || global.Config.Vector == nil || !global.Config.Vector.Enabled {
+		return nil, nil
+	}
+	vectorCfg := global.Config.Vector
+	if vectorCfg.Embedding == nil || !vectorCfg.Embedding.Enabled {
+		global.Log.Warn("向量检索已开启，但 embedding 配置未启用，跳过 Milvus 向量检索")
+		return nil, nil
+	}
+	if vectorCfg.Milvus == nil || !vectorCfg.Milvus.Enabled {
+		global.Log.Warn("向量检索已开启，但 Milvus 配置未启用，跳过 Milvus 向量检索")
+		return nil, nil
+	}
+
+	timeout := time.Duration(vectorCfg.Embedding.TimeoutSeconds) * time.Second
+	embeddingAPIBase := vectorCfg.Embedding.APIBase
+	embeddingAPIKey := vectorCfg.Embedding.APIKey
+	if embeddingAPIBase == "" && global.Config.LLMConfig != nil {
+		embeddingAPIBase = global.Config.LLMConfig.APIBase
+	}
+	if embeddingAPIKey == "" && global.Config.LLMConfig != nil {
+		embeddingAPIKey = global.Config.LLMConfig.APIKey
+	}
+	if strings.TrimSpace(vectorCfg.Embedding.Model) == "" || strings.TrimSpace(embeddingAPIBase) == "" {
+		global.Log.Warn("向量检索已开启，但 embedding model/api_url 未配置，跳过 Milvus 向量检索")
+		return nil, nil
+	}
+	embedder := rag.NewOpenAIEmbeddingModel(
+		vectorCfg.Embedding.Model,
+		embeddingAPIBase,
+		embeddingAPIKey,
+		timeout,
+	)
+	dimension := vectorCfg.Milvus.Dimension
+	if dimension <= 0 {
+		dimension = vectorCfg.Embedding.Dimension
+	}
+	if dimension <= 0 {
+		dimension = 1536
+	}
+	configKey := strings.Join([]string{
+		vectorCfg.Milvus.Address,
+		vectorCfg.Milvus.DBName,
+		vectorCfg.Milvus.Collection,
+		fmt.Sprintf("%d", dimension),
+		vectorCfg.Milvus.MetricType,
+		vectorCfg.Embedding.Model,
+		embeddingAPIBase,
+	}, "|")
+
+	s.vectorComponentMu.Lock()
+	if s.vectorStore != nil && s.vectorEmbedder != nil && s.vectorConfigKey == configKey {
+		store := s.vectorStore
+		embedder := s.vectorEmbedder
+		s.vectorComponentMu.Unlock()
+		if err := s.indexKnowledgeChunksToVectorStore(ctx, chunks, store, embedder, dimension); err != nil {
+			global.Log.Warn("同步审阅知识到 Milvus 失败，本次审阅仍使用关键词检索兜底", zap.Error(err))
+		}
+		return store, embedder
+	}
+
+	store, err := rag.NewMilvusVectorStore(ctx, rag.MilvusVectorStoreConfig{
+		Address:    vectorCfg.Milvus.Address,
+		Username:   vectorCfg.Milvus.Username,
+		Password:   vectorCfg.Milvus.Password,
+		DBName:     vectorCfg.Milvus.DBName,
+		Collection: vectorCfg.Milvus.Collection,
+		Dimension:  dimension,
+		MetricType: vectorCfg.Milvus.MetricType,
+		UseTLS:     vectorCfg.Milvus.UseTLS,
+	})
+	if err != nil {
+		s.vectorComponentMu.Unlock()
+		global.Log.Warn("初始化 Milvus 向量检索失败，将退回关键词检索", zap.Error(err))
+		return nil, nil
+	}
+
+	if closer, ok := s.vectorStore.(interface{ Close() }); ok && s.vectorStore != store {
+		closer.Close()
+	}
+	s.vectorStore = store
+	s.vectorEmbedder = embedder
+	s.vectorConfigKey = configKey
+	s.vectorIndexHashes = make(map[string]string)
+	s.vectorComponentMu.Unlock()
+
+	if err := s.indexKnowledgeChunksToVectorStore(ctx, chunks, store, embedder, dimension); err != nil {
+		global.Log.Warn("同步审阅知识到 Milvus 失败，本次审阅仍使用关键词检索兜底", zap.Error(err))
+	}
+	return store, embedder
+}
+
+func (s *ReviewService) indexKnowledgeChunksToVectorStore(ctx context.Context, chunks []rag.Chunk, store rag.VectorStore, embedder rag.EmbeddingModel, dimension int) error {
+	if len(chunks) == 0 || store == nil || embedder == nil {
+		return nil
+	}
+
+	s.vectorIndexMu.Lock()
+	pending := make([]rag.Chunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		hash := knowledgeChunkHash(chunk)
+		if s.vectorIndexHashes[chunk.ID] == hash {
+			continue
+		}
+		pending = append(pending, chunk)
+	}
+	s.vectorIndexMu.Unlock()
+
+	if len(pending) == 0 {
+		return nil
+	}
+
+	texts := make([]string, 0, len(pending))
+	for _, chunk := range pending {
+		texts = append(texts, chunk.Content)
+	}
+	embeddings, err := embedder.EmbedBatch(texts)
+	if err != nil {
+		return err
+	}
+	indexable := make([]rag.Chunk, 0, len(pending))
+	for i := range pending {
+		if i >= len(embeddings) || len(embeddings[i]) != dimension {
+			continue
+		}
+		pending[i].Embedding = embeddings[i]
+		indexable = append(indexable, pending[i])
+	}
+	if len(indexable) == 0 {
+		return nil
+	}
+	if err := store.Insert(indexable); err != nil {
+		return err
+	}
+
+	s.vectorIndexMu.Lock()
+	for _, chunk := range indexable {
+		s.vectorIndexHashes[chunk.ID] = knowledgeChunkHash(chunk)
+	}
+	s.vectorIndexMu.Unlock()
+
+	global.Log.Info("审阅知识库已同步到 Milvus",
+		zap.Int("chunks", len(indexable)),
+		zap.Int("dimension", dimension))
+	return nil
+}
+
+func knowledgeChunkHash(chunk rag.Chunk) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(chunk.ID))
+	_, _ = h.Write([]byte(chunk.Content))
+	for _, key := range []string{"title", "category", "sub_category", "source", "vector_id"} {
+		_, _ = h.Write([]byte(chunk.Metadata[key]))
+	}
+	return fmt.Sprintf("%x", h.Sum64())
 }
 
 func defaultReviewKnowledgeChunks() []rag.Chunk {
@@ -698,6 +872,7 @@ func defaultReviewKnowledgeChunks() []rag.Chunk {
 func (s *ReviewService) AgentReviewContract(
 	ctx context.Context,
 	task *ReviewTask,
+	contractInfo *contract.Contract,
 	contractContent string,
 	resultChan chan<- ChunkResult,
 ) error {
@@ -711,6 +886,16 @@ func (s *ReviewService) AgentReviewContract(
 		Stance:       task.Stance,
 		Intensity:    task.Intensity,
 	}
+	if contractInfo != nil {
+		meta.PartyA = contractInfo.PartyA
+		meta.PartyB = contractInfo.PartyB
+		if contractInfo.Amount > 0 {
+			meta.Amount = fmt.Sprintf("%.2f", contractInfo.Amount)
+		}
+		if meta.ContractType == "" && contractInfo.ContractType != nil {
+			meta.ContractType = contractInfo.ContractType.Name
+		}
+	}
 
 	if err := s.UpdateTaskStatus(ctx, task.ID, "processing"); err != nil {
 		return err
@@ -723,6 +908,33 @@ func (s *ReviewService) AgentReviewContract(
 			zap.String("status", event.Status),
 			zap.String("message", event.Message),
 			zap.Float64("progress", event.Progress))
+
+		resultChan <- ChunkResult{
+			Progress: &ReviewSSEProgressData{
+				Phase:     event.Phase,
+				Agent:     event.Agent,
+				Status:    event.Status,
+				Message:   event.Message,
+				Progress:  event.Progress,
+				Timestamp: event.Timestamp.Format("2006-01-02 15:04:05"),
+				Data:      sanitizeProgressData(event.Data),
+			},
+		}
+	})
+	s.orchestrator.SetFindingCallback(func(finding agent.RiskFinding) {
+		suggestedContent := finding.SuggestedText
+		reason := finding.SuggestionReason
+		if suggestedContent == "" {
+			suggestedContent = "修改建议生成中..."
+		}
+		if reason == "" {
+			reason = "AI 已识别风险，正在生成可执行修改建议。"
+		}
+		resultChan <- ChunkResult{
+			Modifications: []ModificationItem{
+				modificationFromFinding(finding, suggestedContent, reason),
+			},
+		}
 	})
 
 	report, err := s.orchestrator.ReviewContract(ctx, contractContent, meta)
@@ -732,14 +944,9 @@ func (s *ReviewService) AgentReviewContract(
 	}
 
 	for i, finding := range report.Findings {
-		legalBasisStr := ""
-		for _, lb := range finding.LegalBasis {
-			legalBasisStr += fmt.Sprintf("%s %s: %s\n", lb.Source, lb.Article, lb.Content)
-		}
-
 		var suggestedContent, reason string
 		for _, sug := range report.Suggestions {
-			if sug.RiskFindingID == finding.ClauseID {
+			if sug.RiskFindingID == finding.FindingID || sug.RiskFindingID == finding.ClauseID {
 				suggestedContent = sug.SuggestedText
 				reason = sug.Reason
 				if sug.LegalReference != "" {
@@ -754,15 +961,7 @@ func (s *ReviewService) AgentReviewContract(
 			reason = report.Suggestions[i].Reason
 		}
 
-		mod := ModificationItem{
-			Position:         finding.ClauseID,
-			OriginalContent:  finding.OriginalText,
-			RiskAnalysis:     finding.RiskDescription + "\n\n法律依据:\n" + legalBasisStr,
-			RiskLevel:        finding.RiskLevel,
-			SuggestedContent: suggestedContent,
-			Reason:           reason,
-			RiskType:         finding.RiskType,
-		}
+		mod := modificationFromFinding(finding, suggestedContent, reason)
 
 		resultChan <- ChunkResult{
 			Index:         i,
@@ -771,6 +970,104 @@ func (s *ReviewService) AgentReviewContract(
 	}
 
 	return nil
+}
+
+func sanitizeProgressData(data interface{}) interface{} {
+	switch value := data.(type) {
+	case nil:
+		return nil
+	case *agent.QualityEvaluation:
+		if value == nil {
+			return nil
+		}
+		return map[string]interface{}{
+			"overall_score": value.OverallScore,
+			"critical_gaps": value.CriticalGaps,
+			"should_retry":  value.ShouldRetry,
+		}
+	case map[string]interface{}:
+		return value
+	case map[string]int:
+		out := make(map[string]interface{}, len(value))
+		for k, v := range value {
+			out[k] = v
+		}
+		return out
+	case []agent.Clause:
+		return map[string]interface{}{
+			"clause_count": len(value),
+		}
+	case *agent.ReviewReport:
+		if value == nil {
+			return nil
+		}
+		return map[string]interface{}{
+			"clause_count":     len(value.Clauses),
+			"finding_count":    len(value.Findings),
+			"suggestion_count": len(value.Suggestions),
+			"quality_score":    value.QualityScore,
+			"overall_risk":     value.OverallRisk,
+		}
+	default:
+		return nil
+	}
+}
+
+func modificationFromFinding(finding agent.RiskFinding, suggestedContent, reason string) ModificationItem {
+	return ModificationItem{
+		Position:         finding.ClauseID,
+		OriginalContent:  finding.OriginalText,
+		RiskAnalysis:     buildRiskAnalysis(finding),
+		RiskLevel:        finding.RiskLevel,
+		SuggestedContent: suggestedContent,
+		Reason:           reason,
+		RiskType:         finding.RiskType,
+		StableKey:        findingStableKey(finding),
+	}
+}
+
+func buildRiskAnalysis(finding agent.RiskFinding) string {
+	var sb strings.Builder
+	sb.WriteString(finding.RiskDescription)
+	if len(finding.CandidateIDs) > 0 {
+		sb.WriteString("\n\n知识库候选: ")
+		sb.WriteString(strings.Join(finding.CandidateIDs, "、"))
+	}
+	if len(finding.LegalBasis) == 0 {
+		if finding.Verified {
+			sb.WriteString("\n\n依据命中: 已通过规则验证，具体依据待补全。")
+		} else {
+			sb.WriteString("\n\n依据命中: 知识库未命中，已标记为待人工确认风险。")
+		}
+		return sb.String()
+	}
+
+	sb.WriteString("\n\n法律依据:\n")
+	for _, lb := range finding.LegalBasis {
+		sb.WriteString(fmt.Sprintf("%s %s: %s\n", lb.Source, lb.Article, lb.Content))
+	}
+	return sb.String()
+}
+
+func findingStableKey(finding agent.RiskFinding) string {
+	if strings.TrimSpace(finding.FindingID) != "" {
+		return strings.TrimSpace(finding.FindingID)
+	}
+	parts := []string{
+		finding.ClauseID,
+		finding.RiskType,
+		truncateForKey(finding.OriginalText, 80),
+		truncateForKey(finding.RiskDescription, 80),
+	}
+	return strings.Join(parts, "|")
+}
+
+func truncateForKey(value string, max int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= max {
+		return string(runes)
+	}
+	return string(runes[:max])
 }
 
 // 默认基础提示词（保留用于旧模式兼容）

@@ -14,7 +14,7 @@ import {markdownPlugin} from "@/lib/canvas-editor/plugins/markdown";
 import RiskCard from "@/components/review/RiskCard.v2";
 import Topbar from "@/components/Topbar";
 import EditorToolbar from "@/components/editor/EditorToolbar";
-import {UploadStore} from "@/store/uploadStore";
+import {UploadStore, type UploadData} from "@/store/uploadStore";
 import {RiskStore} from "@/store/riskStore";
 import Signboard from "@/components/signboard/Signboard";
 import ReviewHistory from "@/components/list/ReviewHistory";
@@ -30,6 +30,54 @@ import {resolveFileUrl} from "@/utils/url";
 import ContractContrastPanel from "@/components/contrast/ContractContrastPanel";
 import {authDatedHandler} from "@/utils/authDatedHandler";
 import { buildStaticFileUrl } from '@/utils/url';
+
+function readStoredReviewUploadData(): UploadData | null {
+    if (typeof window === "undefined") return null;
+
+    const storedFileUrl = localStorage.getItem("uploaded_file_url") || undefined;
+    const storedFileType = localStorage.getItem("uploaded_file_type") || undefined;
+    const storedFileTitle = localStorage.getItem("uploaded_file_title") || undefined;
+    const storedPartyA = localStorage.getItem("uploaded_party_a") || undefined;
+    const storedPartyB = localStorage.getItem("uploaded_party_b") || undefined;
+    const storedFileId = Number(localStorage.getItem("uploaded_file_id") || 0);
+    const storedContractTypeId = Number(localStorage.getItem("uploaded_contract_type_id") || 0);
+
+    if (!storedFileUrl && !storedFileType && !storedFileTitle) {
+        return null;
+    }
+
+    return {
+        file_url: storedFileUrl,
+        file_type: storedFileType,
+        title: storedFileTitle,
+        party_a: storedPartyA,
+        party_b: storedPartyB,
+        file_id: Number.isFinite(storedFileId) && storedFileId > 0 ? storedFileId : undefined,
+        contract_type_id:
+            Number.isFinite(storedContractTypeId) && storedContractTypeId > 0
+                ? storedContractTypeId
+                : undefined,
+    };
+}
+
+function persistReviewUploadData(uploadData: UploadData) {
+    if (typeof window === "undefined" || !uploadData?.file_url) return;
+
+    localStorage.setItem("uploaded_file_url", uploadData.file_url);
+    if (uploadData.file_type) localStorage.setItem("uploaded_file_type", uploadData.file_type);
+    if (uploadData.title) localStorage.setItem("uploaded_file_title", uploadData.title);
+    if (uploadData.file_id) localStorage.setItem("uploaded_file_id", String(uploadData.file_id));
+    if (uploadData.contract_type_id) {
+        localStorage.setItem("uploaded_contract_type_id", String(uploadData.contract_type_id));
+    }
+    if (uploadData.party_a !== undefined && uploadData.party_a !== null) {
+        localStorage.setItem("uploaded_party_a", uploadData.party_a);
+    }
+    if (uploadData.party_b !== undefined && uploadData.party_b !== null) {
+        localStorage.setItem("uploaded_party_b", uploadData.party_b);
+    }
+}
+
 export default function ReviewPageContent() {
     const [activeTab, setActiveTab] = useState<TabType>("check");
     const [user, setUser] = useState<User | null>(null);
@@ -45,43 +93,56 @@ export default function ReviewPageContent() {
     const [historyType, setHistoryType] = useState<"review" | "contrast">("review");
     const riskDataList = RiskStore((e) => e.riskDataList);
     const isStreaming = RiskStore((e) => e.isStreaming);
-    const isCompleted = RiskStore((e) => e.isCompleted);
     const sourceFileUrl = RiskStore((e) => e.sourceFileUrl);
     const resetRiskData = RiskStore((e) => e.resetRiskData);
     const data = UploadStore((e) => e.data);
     const setData = UploadStore((e) => e.setData);
+    const [restoredUploadData, setRestoredUploadData] = useState<UploadData | null>(null);
     const router = useRouter();
 
-    const isReviewing = isStreaming || !isCompleted;
+    const isReviewing = isStreaming;
+
+    const restoreReviewUploadData = useCallback(() => {
+        const currentData = UploadStore.getState().data;
+        if (currentData?.file_url) {
+            persistReviewUploadData(currentData);
+            setRestoredUploadData(currentData);
+            return currentData;
+        }
+
+        const storedData = readStoredReviewUploadData();
+        if (!storedData?.file_url) return null;
+
+        const mergedData = {
+            ...currentData,
+            ...storedData,
+        };
+        setData(mergedData);
+        setRestoredUploadData(mergedData);
+        return mergedData;
+    }, [setData]);
 
     useEffect(() => {
-        if (typeof window !== "undefined") {
-            const currentData = UploadStore.getState().data;
-            const storedFileUrl = localStorage.getItem("uploaded_file_url");
-            const storedFileType = localStorage.getItem("uploaded_file_type");
-            const storedFileTitle = localStorage.getItem("uploaded_file_title");
-            const storedPartyA = localStorage.getItem("uploaded_party_a");
-            const storedPartyB = localStorage.getItem("uploaded_party_b");
+        restoreReviewUploadData();
+    }, [restoreReviewUploadData]);
 
-            const hasStoredFile = storedFileUrl || storedFileType || storedFileTitle;
-
-            if (
-                (!currentData || !currentData.file_url) &&
-                hasStoredFile
-            ) {
-                setData({
-                    file_url: storedFileUrl || undefined,
-                    file_type: storedFileType || undefined,
-                    title: storedFileTitle || undefined,
-                    party_a: storedPartyA || undefined,
-                    party_b: storedPartyB || undefined,
-                });
-            }
+    useEffect(() => {
+        if (data?.file_url) {
+            persistReviewUploadData(data);
+            setRestoredUploadData(data);
         }
-    }, []);
-    const title = data?.title ?? "";
-    const file_type = data?.file_type ?? "docx";
-    const file_url = resolveFileUrl(data?.file_url);
+    }, [data]);
+
+    useEffect(() => {
+        if (activeTab === "check" && !data?.file_url) {
+            restoreReviewUploadData();
+        }
+    }, [activeTab, data?.file_url, restoreReviewUploadData]);
+
+    const effectiveData = data?.file_url ? data : restoredUploadData || data;
+    const title = effectiveData?.title ?? "";
+    const file_type = effectiveData?.file_type ?? "docx";
+    const file_url = resolveFileUrl(effectiveData?.file_url);
     const documentKey = useMemo(() => {
         if (!file_url) return "";
         let hash = 0;
@@ -95,7 +156,8 @@ export default function ReviewPageContent() {
 
     // 当文档 URL 变化时，检查是否需要清除旧的风险点数据
     useEffect(() => {
-        if (file_url && sourceFileUrl && file_url !== sourceFileUrl) {
+        const normalizedSourceFileUrl = resolveFileUrl(sourceFileUrl || undefined);
+        if (file_url && normalizedSourceFileUrl && file_url !== normalizedSourceFileUrl) {
             // 当前文档和风险点数据不匹配，清除旧数据
             resetRiskData();
         }
@@ -517,6 +579,7 @@ export default function ReviewPageContent() {
                     setUser(null);
                 }}
                 activeTab={activeTab}
+                onTabClick={setActiveTab}
             />
             <div
                 className="flex flex-row flex-1"
@@ -664,10 +727,10 @@ export default function ReviewPageContent() {
                                             ""
                                         )}
                                         <p className="text-sm text-gray-400">
-                                            {!file_url && "文件URL: " + (data?.file_url || "未设置")}
+                                            {!file_url && "文件URL: " + (effectiveData?.file_url || "未设置")}
                                             {file_url &&
                                                 !file_type &&
-                                                "文件类型: " + (data?.file_type || "未设置")}
+                                                "文件类型: " + (effectiveData?.file_type || "未设置")}
                                         </p>
                                     </div>
                                 </div>

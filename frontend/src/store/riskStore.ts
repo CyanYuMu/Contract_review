@@ -1,13 +1,15 @@
 "use client";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { RiskResponse } from "@/lib/Interface";
+import { ReviewProgressEvent, RiskResponse } from "@/lib/Interface";
 
 type RiskState = {
   riskDataList: RiskResponse[];
   replacedNum: number;
   isStreaming: boolean;
   isCompleted: boolean;
+  currentProgress: ReviewProgressEvent | null;
+  progressEvents: ReviewProgressEvent[];
   sourceFileUrl: string | null; // 记录当前风险点对应的文档 URL
   addRiskData: (risk: RiskResponse) => void;
   setRiskDataList: (riskList: RiskResponse[], sourceFileUrl?: string) => void;
@@ -18,6 +20,7 @@ type RiskState = {
   resetRiskData: () => void;
   setStreaming: (isStreaming: boolean) => void;
   setCompleted: (isCompleted: boolean) => void;
+  addProgressEvent: (event: ReviewProgressEvent) => void;
   setSourceFileUrl: (url: string | null) => void;
 };
 
@@ -30,6 +33,8 @@ export const RiskStore = create<RiskState>()(
       replacedNum: 0,
       isStreaming: false,
       isCompleted: false,
+      currentProgress: null,
+      progressEvents: [],
       sourceFileUrl: null,
       addRiskData: (risk) =>
         set((state) => {
@@ -92,7 +97,10 @@ export const RiskStore = create<RiskState>()(
                     item.suggested_content || "",
                     risk.suggested_content || ""
                   ),
+                  reason: mergeText(item.reason || "", risk.reason || ""),
                   risk_level: risk.risk_level || item.risk_level,
+                  risk_type: risk.risk_type || item.risk_type,
+                  is_accepted: risk.is_accepted ?? item.is_accepted,
                   created_at: risk.created_at || item.created_at,
                 };
               }
@@ -128,9 +136,24 @@ export const RiskStore = create<RiskState>()(
         set((state) => ({ replacedNum: state.replacedNum + 1 }))
       ,
       resetRiskData: () =>
-        set({ riskDataList: [],replacedNum: 0, isStreaming: false, isCompleted: false, sourceFileUrl: null }),
+        set({ riskDataList: [],replacedNum: 0, isStreaming: false, isCompleted: false, currentProgress: null, progressEvents: [], sourceFileUrl: null }),
       setStreaming: (isStreaming) => set({ isStreaming }),
       setCompleted: (isCompleted) => set({ isCompleted }),
+      addProgressEvent: (event) =>
+        set((state) => {
+          const eventProgress = Number(event.progress || 0);
+          const isTerminalEvent =
+            event.status === "failed" ||
+            eventProgress >= 1 ||
+            (event.phase === "report" && event.status === "completed");
+
+          return {
+            currentProgress: event,
+            progressEvents: [...state.progressEvents, event].slice(-30),
+            isStreaming: isTerminalEvent ? false : true,
+            isCompleted: isTerminalEvent && event.status !== "failed" ? true : state.isCompleted,
+          };
+        }),
       setSourceFileUrl: (url) => set({ sourceFileUrl: url }),
     }),
     {

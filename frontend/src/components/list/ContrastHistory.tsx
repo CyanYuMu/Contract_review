@@ -28,6 +28,47 @@ type Props = {
     onTypeChange?: (type: FilterType) => void;
 };
 
+type CompareFileInfo = {
+    file_id?: number;
+    title?: string;
+    file_path?: string;
+    download_url?: string;
+};
+
+type CompareSessionListItem = {
+    session_id?: number;
+    id?: number;
+    file_name?: string;
+    file_name_1?: string;
+    file_name_2?: string;
+    similarity?: number;
+    status?: string;
+    created_at?: string;
+    file_path?: string;
+    file_path_1?: string;
+    file_path_2?: string;
+    original_file_path?: string;
+    comparison_file_path?: string;
+    file_id?: number;
+    file_id_1?: number;
+    file_id_2?: number;
+    original_file_id?: number;
+    comparison_file_id?: number;
+    download_url?: string;
+    download_url_2?: string;
+    standard_download_url?: string;
+    comparison_download_url?: string;
+    standard_file?: CompareFileInfo;
+    comparison_file?: CompareFileInfo;
+};
+
+type CompareHistoryPayload = {
+    session_id?: number;
+    diffs?: unknown[];
+    standard_file?: CompareFileInfo;
+    comparison_file?: CompareFileInfo;
+};
+
 export default function ContrastHistory({
     type = "Contrast",
     onTypeChange,
@@ -59,6 +100,9 @@ export default function ContrastHistory({
     const [searchTrigger, setSearchTrigger] = useState(0);
     // 防止重复请求
     const isFetching = useRef(false);
+    const safeBuildStaticFileUrl = (filePath?: string) => {
+        return filePath ? buildStaticFileUrl(filePath) : "";
+    };
 
     // 本地过滤函数（接收数据参数）
     const applyFiltersToData = (currentFilters: ReviewFilterValues, data: contrastType[]) => {
@@ -113,10 +157,20 @@ export default function ContrastHistory({
                     session_type: "compare",
                 });
 
-                const list = res?.data?.sessions ?? [];
-                const totalCount = res?.data?.total ?? list.length;
+                const responseData = res?.data ?? res;
+                const listData =
+                    responseData?.sessions ??
+                    responseData?.data?.sessions ??
+                    responseData?.data?.data?.sessions ??
+                    [];
+                const list: CompareSessionListItem[] = Array.isArray(listData) ? listData : [];
+                const totalCount =
+                    responseData?.total ??
+                    responseData?.data?.total ??
+                    responseData?.data?.data?.total ??
+                    list.length;
                 const normalized = normalize(
-                    list.map((item: any, idx: number) => {
+                    list.map((item, idx: number) => {
                         const standardFile = item.standard_file ?? {};
                         const comparisonFile = item.comparison_file ?? {};
                         return {
@@ -124,7 +178,7 @@ export default function ContrastHistory({
                             origin_contract_name: item.file_name_1 ?? item.file_name ?? standardFile.title ?? "",
                             new_contract_name: item.file_name_2 ?? comparisonFile.title ?? "",
                             similarity: item.similarity ?? 0,
-                            status: item.status === "completed" || Number(item.similarity ?? 0) > 0,
+                            status: item.status ? item.status === "completed" : Boolean(item.file_id_1 && item.file_id_2),
                             dateRange: item.created_at ?? "",
                             file_path: item.file_path_1 ?? item.file_path ?? standardFile.file_path ?? item.original_file_path ?? "",
                             file_path_2: item.file_path_2 ?? comparisonFile.file_path ?? item.comparison_file_path ?? "",
@@ -230,7 +284,7 @@ export default function ContrastHistory({
 
     const handleView = async (record: contrastType) => {
         const sessionId = Number(record.id);
-        let detailPayload: any = null;
+        let detailPayload: CompareHistoryPayload | null = null;
 
         if (sessionId) {
             try {
@@ -239,6 +293,7 @@ export default function ContrastHistory({
                 detailPayload = detailData?.data ?? detailData;
                 if (detailPayload) {
                     localStorage.setItem("comparison_history_detail", JSON.stringify(detailPayload));
+                    localStorage.setItem("comparison_result", JSON.stringify(detailPayload));
                 }
             } catch (e) {
                 const message = e instanceof Error ? e.message : "获取比对记录失败";
@@ -250,10 +305,10 @@ export default function ContrastHistory({
         const standardFile = detailPayload?.standard_file ?? {};
         const comparisonFile = detailPayload?.comparison_file ?? {};
         const originalFileUrl =
-            buildStaticFileUrl(standardFile.file_path ?? record.original_file_path ?? record.file_path ?? "") ||
+            safeBuildStaticFileUrl(standardFile.file_path ?? record.original_file_path ?? record.file_path ?? "") ||
             resolveFileUrl(standardFile.download_url ?? record.standard_download_url ?? "");
         const comparisonFileUrl =
-            buildStaticFileUrl(comparisonFile.file_path ?? record.comparison_file_path ?? record.file_path_2 ?? "") ||
+            safeBuildStaticFileUrl(comparisonFile.file_path ?? record.comparison_file_path ?? record.file_path_2 ?? "") ||
             resolveFileUrl(comparisonFile.download_url ?? record.comparison_download_url ?? "");
 
         if (!originalFileUrl || !comparisonFileUrl) {
@@ -276,11 +331,21 @@ export default function ContrastHistory({
         localStorage.setItem("comparison_file_url", comparisonFileUrl);
         localStorage.setItem("original_file_title", record.origin_contract_name ?? "");
         localStorage.setItem("comparison_file_title", record.new_contract_name ?? "");
+        localStorage.setItem("contrast_workspace_active", "1");
+        if (sessionId) {
+            localStorage.setItem("comparison_session_id", String(sessionId));
+        }
         if (record.original_file_id ?? record.file_id) {
             localStorage.setItem("original_file_id", String(record.original_file_id ?? record.file_id));
         }
         if (record.comparison_file_id ?? record.file_id_2) {
             localStorage.setItem("comparison_file_id", String(record.comparison_file_id ?? record.file_id_2));
+        }
+        if ((record.original_file_id ?? record.file_id) && (record.comparison_file_id ?? record.file_id_2)) {
+            localStorage.setItem(
+                "comparison_pair_key",
+                `${record.original_file_id ?? record.file_id}:${record.comparison_file_id ?? record.file_id_2}`
+            );
         }
 
         router.push("/result");

@@ -167,6 +167,16 @@ export interface RiskResponse {
     created_at: string;
 }
 
+export interface ReviewProgressEvent {
+    phase: string;
+    agent: string;
+    status: "running" | "completed" | "failed" | string;
+    message: string;
+    progress: number;
+    timestamp: string;
+    data?: unknown;
+}
+
 export interface ReplaceProps {
     original_content: string;
     suggested_content: string;
@@ -226,6 +236,7 @@ export interface historyType {
     id?: number;
     title: string;
     session_type: string;
+    type?: string;
     is_accepted?: boolean;
     created_at: string;
     partyA: string;

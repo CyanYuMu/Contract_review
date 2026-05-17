@@ -1,8 +1,8 @@
 import React, {useEffect, useMemo, useRef, useState} from "react";
 import {Button, Modal, Switch} from "antd";
 import toast from "react-hot-toast";
-import {RiskResponse} from "@/lib/Interface";
-import Editor from "@/lib/canvas-editor/editor";
+import {ReviewProgressEvent, RiskResponse} from "@/lib/Interface";
+import Editor, {type IElement} from "@/lib/canvas-editor/editor";
 import {removeQuotes} from "@/utils/textUtils";
 import {CharacterMapper} from "@/utils/characterMapping";
 import {RiskStore} from "@/store/riskStore";
@@ -15,6 +15,199 @@ type RiskCardProps = {
     riskDataList?: RiskResponse[];
     editor?: InstanceType<typeof Editor> | null;
 };
+
+const phaseLabelMap: Record<string, string> = {
+    prepare: "准备审阅",
+    clause_split: "条款拆分",
+    candidate_retrieve: "依据命中",
+    risk_identify: "风险识别",
+    suggestion: "修改建议",
+    quality: "质量评估",
+    report: "报告生成",
+};
+
+function getPhaseLabel(phase: string) {
+    return phaseLabelMap[phase] || phase || "审阅进度";
+}
+
+function extractCriticalGaps(event: ReviewProgressEvent | null): string[] {
+    if (!event?.data || typeof event.data !== "object") return [];
+
+    const data = event.data as {
+        critical_gaps?: unknown;
+        criticalGaps?: unknown;
+        CriticalGaps?: unknown;
+    };
+    const gaps = data.critical_gaps ?? data.criticalGaps ?? data.CriticalGaps;
+    if (!Array.isArray(gaps)) return [];
+
+    return gaps
+        .filter((item): item is string => typeof item === "string")
+        .slice(0, 3);
+}
+
+function extractQualityScore(event: ReviewProgressEvent | null): number | null {
+    if (!event?.data || typeof event.data !== "object") return null;
+
+    const data = event.data as { overall_score?: unknown; overallScore?: unknown };
+    const score = data.overall_score ?? data.overallScore;
+    return typeof score === "number" ? score : null;
+}
+
+function formatEventMeta(event: ReviewProgressEvent | null): string {
+    if (!event?.data || typeof event.data !== "object") return "";
+
+    const data = event.data as {
+        event_type?: unknown;
+        legal_basis_count?: unknown;
+        legalBasisCount?: unknown;
+        legal_basis_sources?: unknown;
+        candidate_count?: unknown;
+        candidate_ids?: unknown;
+        candidate_sources?: unknown;
+        risk_type?: unknown;
+        risk_level?: unknown;
+        finding_count?: unknown;
+        verified_count?: unknown;
+        total?: unknown;
+        verified?: unknown;
+        clause_count?: unknown;
+        suggestion_count?: unknown;
+    };
+
+    if (data.event_type === "risk_found") {
+        const count = Number(data.legal_basis_count ?? data.legalBasisCount ?? 0);
+        const sources = Array.isArray(data.legal_basis_sources)
+            ? data.legal_basis_sources.filter((item): item is string => typeof item === "string").slice(0, 2)
+            : [];
+        const status = data.verified === false ? "待人工确认" : "已验证";
+        return [
+            status,
+            data.risk_type ? String(data.risk_type) : "",
+            data.risk_level ? String(data.risk_level) : "",
+            `依据命中 ${count} 条${sources.length ? `：${sources.join("、")}` : ""}`,
+        ].filter(Boolean).join(" · ");
+    }
+
+    if (data.event_type === "candidate_retrieved") {
+        const count = Number(data.candidate_count ?? 0);
+        const sources = Array.isArray(data.candidate_sources)
+            ? data.candidate_sources.filter((item): item is string => typeof item === "string").slice(0, 3)
+            : [];
+        const ids = Array.isArray(data.candidate_ids)
+            ? data.candidate_ids.filter((item): item is string => typeof item === "string").slice(0, 3)
+            : [];
+        const sourceText = sources.length ? `：${sources.join("、")}` : "";
+        const idText = ids.length ? ` (${ids.join("、")})` : "";
+        return `候选风险点 ${count} 条${sourceText}${idText}`;
+    }
+
+    if (data.event_type === "clause_reviewed") {
+        const candidateCount = Number(data.candidate_count ?? 0);
+        const sources = Array.isArray(data.candidate_sources)
+            ? data.candidate_sources.filter((item): item is string => typeof item === "string").slice(0, 2)
+            : [];
+        const evidenceText = candidateCount > 0
+            ? `，候选 ${candidateCount} 条${sources.length ? `：${sources.join("、")}` : ""}`
+            : "";
+        return `本条发现 ${Number(data.finding_count ?? 0)} 个风险点，已验证 ${Number(data.verified_count ?? 0)} 个${evidenceText}`;
+    }
+
+    const total = data.total;
+    const verified = data.verified_count ?? data.verified;
+    if (typeof total === "number" && typeof verified === "number") {
+        return `已验证 ${verified}/${total}`;
+    }
+
+    if (typeof data.clause_count === "number") {
+        return `条款 ${data.clause_count} 个${typeof data.suggestion_count === "number" ? `，建议 ${data.suggestion_count} 条` : ""}`;
+    }
+
+    return "";
+}
+
+function ReviewProgressPanel({
+                                 currentProgress,
+                                 progressEvents,
+                             }: {
+    currentProgress: ReviewProgressEvent | null;
+    progressEvents: ReviewProgressEvent[];
+}) {
+    const percent = Math.round((currentProgress?.progress ?? 0) * 100);
+    const gaps = extractCriticalGaps(currentProgress);
+    const qualityScore = extractQualityScore(currentProgress);
+    const currentMeta = formatEventMeta(currentProgress);
+    const events = [...progressEvents].reverse();
+
+    return (
+        <div className="review-progress-panel">
+            <div className="review-progress-header">
+                <div>
+                    <div className="review-progress-title">
+                        {getPhaseLabel(currentProgress?.phase || "")}
+                    </div>
+                    <div className="review-progress-message">
+                        {currentProgress?.message || "正在启动合同审阅..."}
+                    </div>
+                </div>
+                <div className="review-progress-metrics">
+                    <div className="review-progress-percent">{percent}%</div>
+                    {qualityScore !== null && (
+                        <div className="review-progress-score">
+                            质量 {qualityScore.toFixed(2)}
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            <div className="review-progress-track">
+                <div
+                    className="review-progress-fill"
+                    style={{width: `${Math.min(100, Math.max(0, percent))}%`}}
+                />
+            </div>
+
+            {gaps.length > 0 && (
+                <div className="review-progress-gaps">
+                    {gaps.map((gap) => (
+                        <div key={gap} className="review-progress-gap">
+                            {gap}
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {currentMeta && (
+                <div className="review-progress-meta">
+                    {currentMeta}
+                </div>
+            )}
+
+            {events.length > 0 && (
+                <div className="review-progress-timeline">
+                    {events.map((event, index) => (
+                        <div
+                            key={`${event.phase}-${event.status}-${event.timestamp}-${index}`}
+                            className={`review-progress-step ${event.status === "completed" ? "is-completed" : ""}`}
+                        >
+                            <span className="review-progress-dot"/>
+                            <div className="review-progress-step-content">
+                                <div className="review-progress-step-title">
+                                    {getPhaseLabel(event.phase)}
+                                    {event.agent ? ` · ${event.agent}` : ""}
+                                </div>
+                                <div className="review-progress-step-message">{event.message}</div>
+                                {formatEventMeta(event) && (
+                                    <div className="review-progress-step-meta">{formatEventMeta(event)}</div>
+                                )}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
 
 /**
  * 从 HTML 字符串中提取纯文本
@@ -40,6 +233,61 @@ function extractTextFromHTML(html: string): string {
     return text;
 }
 
+function normalizeRiskText(content: string): string {
+    return removeQuotes(extractTextFromHTML(content))
+        .replace(/\u00a0/g, " ")
+        .replace(/[ \t]+/g, " ")
+        .replace(/\s*\n\s*/g, "\n")
+        .trim();
+}
+
+function buildEditorSearchTexts(searchText: string, allowSnippets = false): string[] {
+    const normalized = normalizeRiskText(searchText);
+    const candidates = [
+        normalized,
+        normalized.replace(/\s+/g, " ").trim(),
+        normalized.replace(/[\r\n]+/g, "").trim(),
+        normalized.replace(/\s*([，。！？；：、,.!?;:])\s*/g, "$1").trim(),
+    ];
+
+    if (allowSnippets && normalized.length > 80) {
+        candidates.push(
+            normalized.slice(0, 120).trim(),
+            normalized.slice(-120).trim(),
+            normalized.slice(0, 80).trim(),
+            normalized.slice(-80).trim()
+        );
+    }
+
+    const seen = new Set<string>();
+    return candidates.filter((item) => {
+        if (!item || item.length < 4 || seen.has(item)) return false;
+        seen.add(item);
+        return true;
+    });
+}
+
+function pickBaseFormat(selectionElementList: Array<Partial<IElement>> = []) {
+    const firstElement =
+        selectionElementList.find((item) => item?.value && item.value !== "\n") ||
+        selectionElementList[0] ||
+        {};
+
+    return {
+        font: firstElement.font,
+        size: firstElement.size,
+        bold: firstElement.bold,
+        italic: firstElement.italic,
+        underline: firstElement.underline,
+        strikeout: firstElement.strikeout,
+        rowFlex: firstElement.rowFlex,
+        rowMargin: firstElement.rowMargin,
+        letterSpacing: firstElement.letterSpacing,
+        highlight: firstElement.highlight,
+        textDecoration: firstElement.textDecoration,
+    };
+}
+
 export default function RiskCard({riskDataList: propRiskDataList = [], editor}: RiskCardProps) {
     const [selectedId, setSelectedId] = useState<number | null>(null);
     const [modalContent, setModalContent] = useState<string>("");
@@ -56,6 +304,8 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
     const replacedNum = RiskStore((state) => state.replacedNum);
     const isCompleted = RiskStore((state) => state.isCompleted);
     const isStreaming = RiskStore((state) => state.isStreaming);
+    const currentProgress = RiskStore((state) => state.currentProgress);
+    const progressEvents = RiskStore((state) => state.progressEvents);
     const storeRiskDataList = RiskStore((state) => state.riskDataList);
     const riskDataList =
         storeRiskDataList.length > 0 ? storeRiskDataList : propRiskDataList;
@@ -169,12 +419,17 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
     }, [editor]);
 
     const handleLocate = async (originalContent: string) => {
-        if (!editor) return;
+        if (!editor) {
+            toast.error("编辑器尚未加载完成");
+            return;
+        }
 
         try {
-            // 先提取 HTML 标签中的纯文本
-            const plainText = extractTextFromHTML(originalContent);
-            const cleanedOriginal = removeQuotes(plainText.trim());
+            const cleanedOriginal = normalizeRiskText(originalContent);
+            if (!cleanedOriginal) {
+                toast.error("风险原文为空，无法定位");
+                return;
+            }
 
             // 优先级1: 优先使用编辑器 API
             const editorResult = await tryEditorAPI(editor, cleanedOriginal);
@@ -201,7 +456,7 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
 
             // 所有方法都失败
             showModal(cleanedOriginal);
-        } catch (error) {
+        } catch {
             toast.error("定位过程中发生错误，请稍后重试");
         }
     };
@@ -216,18 +471,25 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
         originalContent: string,
         suggestedContent: string
     ) => {
-        if (!editor) return;
+        if (!editor) {
+            toast.error("编辑器尚未加载完成");
+            return;
+        }
 
         try {
-            // 先提取 HTML 标签中的纯文本
-            const plainText = extractTextFromHTML(originalContent);
-            const cleanedOriginal = removeQuotes(plainText.trim());
+            const cleanedOriginal = normalizeRiskText(originalContent);
+            const cleanedSuggestion = normalizeRiskText(suggestedContent);
+
+            if (!cleanedOriginal || !cleanedSuggestion) {
+                toast.error("缺少可应用的原文或修订建议");
+                return;
+            }
 
             // 优先级1: 优先使用编辑器 API
             const editorResult = await tryEditorAPIReplace(
                 editor,
                 cleanedOriginal,
-                suggestedContent
+                cleanedSuggestion
             );
             if (editorResult) {
                 // 修订完成后，删除这条风险数据
@@ -245,30 +507,21 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
                 return;
             }
 
-            // 优先级2: 使用字符映射器
+            let located = false;
             if (mapperRef.current) {
-                const mapperResult = tryCharacterMapperReplace(
-                    mapperRef.current,
-                    cleanedOriginal,
-                    suggestedContent
-                );
-                if (mapperResult) {
-                    // 修订完成后，删除这条风险数据
-                    removeRiskData(riskId);
-                    // 已修订数量加1
-                    addReplacedNum()
-                    toast.success("修订成功");
-
-                    // 替换后重建映射
-                    setTimeout(() => {
-                        mapperRef.current?.rebuild();
-                    }, 300);
-                    return;
-                }
+                located = tryCharacterMapper(mapperRef.current, cleanedOriginal);
+            }
+            if (!located) {
+                located = await tryDOMSearch(cleanedOriginal);
             }
 
             showModal(cleanedOriginal);
-        } catch (error) {
+            toast.error(
+                located
+                    ? "已定位到疑似原文，但未能安全应用修订，请人工确认后修改"
+                    : "未能安全定位原文，已停止自动修订"
+            );
+        } catch {
             toast.error("替换操作失败，请稍后重试");
         }
     };
@@ -296,17 +549,32 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
         };
     }, [sortedRiskData]);
     const totalRiskCount = sortedRiskData.length || 1;
+    const hasReviewActivity = isStreaming || progressEvents.length > 0;
 
     // 空列表处理：区分"审查中"和"已全部修订"
     if (riskDataList.length === 0) {
         // 正在审查中（还没有数据）
-        if (isStreaming || !isCompleted) {
+        if (isStreaming || (hasReviewActivity && !isCompleted)) {
             return (
                 <div className="reviewing-wrapper">
                     <div className="reviewing-container">
                         <div className="reviewing-spinner"></div>
-                        <div className="reviewing-text">审查中</div>
+                        <ReviewProgressPanel
+                            currentProgress={currentProgress}
+                            progressEvents={progressEvents}
+                        />
                     </div>
+                </div>
+            );
+        }
+
+        if (!hasReviewActivity) {
+            return (
+                <div className="flex flex-col items-center justify-center p-12 text-center">
+                    <div className="text-xl font-medium text-gray-800 mb-2">
+                        暂无审阅结果
+                    </div>
+                    <div className="text-sm text-gray-500">请先上传合同并启动审查</div>
                 </div>
             );
         }
@@ -358,7 +626,9 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
                         {isStreaming ? (
                                 <>
                                     <span className="inline-block w-2 h-2 bg-[#2260F2] rounded-full animate-pulse" />
-                                    <span className="text-[0.75rem] text-[#2260F2]">正在审查中...已审查{riskDataList?.length||0}个风险点</span>
+                                    <span className="text-[0.75rem] text-[#2260F2]">
+                                        {currentProgress?.message || `正在审查中...已审查${riskDataList?.length || 0}个风险点`}
+                                    </span>
                                 </>
                         ) : (
                             <>
@@ -385,6 +655,15 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
                         />
                     </div>
                 </div>
+
+                {hasReviewActivity && (
+                    <div className="mx-auto w-[31.63rem]">
+                        <ReviewProgressPanel
+                            currentProgress={currentProgress}
+                            progressEvents={progressEvents}
+                        />
+                    </div>
+                )}
 
                 <div className="mx-auto w-[31.63rem] bg-white border border-[#e8edf7] rounded-[0.31rem] p-3">
                     <div className="flex h-2 overflow-hidden rounded bg-[#eef2f7]">
@@ -488,7 +767,7 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
                             <div>
                                 <span className="text-[1rem] font-medium">修订建议：</span>
                                 <div className="text-[#2260F2]">
-                                    {extractTextFromHTML(item.suggested_content)}
+                                    {extractTextFromHTML(item.suggested_content) || (isStreaming ? "修改建议生成中..." : "暂无自动建议，请人工复核")}
                                 </div>
                             </div>
                             {item.reason && (
@@ -549,10 +828,9 @@ async function tryEditorAPI(
 ): Promise<boolean> {
     const command = editor.command;
 
-    const strategies = [() => searchText, () => searchText.replace(/\s+/g, " ")];
+    const strategies = buildEditorSearchTexts(searchText, true);
 
-    for (const strategy of strategies) {
-        const text = strategy();
+    for (const text of strategies) {
         if (!text) continue;
 
         command.executeSearch(text);
@@ -756,10 +1034,9 @@ async function tryEditorAPIReplace(
 ): Promise<boolean> {
     const command = editor.command;
 
-    const strategies = [() => searchText, () => searchText.replace(/\s+/g, " ")];
+    const strategies = buildEditorSearchTexts(searchText, false);
 
-    for (const strategy of strategies) {
-        const text = strategy();
+    for (const text of strategies) {
         if (!text) continue;
 
         command.executeSearch(text);
@@ -800,9 +1077,7 @@ async function tryEditorAPIReplace(
 
                 await new Promise((resolve) => requestAnimationFrame(resolve));
 
-                // 尝试获取原文格式
-                // eslint-disable-next-line
-                let baseFormat: any = {};
+                let baseFormat: Partial<IElement> = {};
                 try {
                     const rangeContext = command.getRangeContext?.();
                     if (
@@ -810,16 +1085,7 @@ async function tryEditorAPIReplace(
                         rangeContext.selectionElementList &&
                         rangeContext.selectionElementList.length > 0
                     ) {
-                        // 使用第一个字符的格式作为基准
-                        const firstElement = rangeContext.selectionElementList[0];
-                        baseFormat = {
-                            font: firstElement.font,
-                            size: firstElement.size,
-                            bold: firstElement.bold,
-                            italic: firstElement.italic,
-                            underline: firstElement.underline,
-                            strikeout: firstElement.strikeout,
-                        };
+                        baseFormat = pickBaseFormat(rangeContext.selectionElementList);
                     }
                 } catch (error) {
                     console.warn("获取原文格式失败，使用默认格式:", error);
@@ -827,9 +1093,9 @@ async function tryEditorAPIReplace(
 
                 // 插入带红色标记的文本，保留原格式
                 const suggestedElements = replaceText.split("").map((char) => ({
+                    ...baseFormat, // 保留原格式
                     value: char,
                     color: "#FF0000",
-                    ...baseFormat, // 保留原格式
                 }));
                 command.executeInsertElementList(suggestedElements);
 
@@ -839,119 +1105,6 @@ async function tryEditorAPIReplace(
         }
 
         command.executeSearch(null);
-    }
-
-    return false;
-}
-
-/**
- * 尝试使用字符映射器替换
- */
-function tryCharacterMapperReplace(
-    mapper: CharacterMapper,
-    searchText: string,
-    replaceText: string
-): boolean {
-    const result = mapper.smartFind(searchText);
-
-    if (result) {
-        const textRange = mapper.getRange(result.start, result.end);
-        if (!textRange) return false;
-
-        try {
-            const range = document.createRange();
-            range.setStart(textRange.startNode, textRange.startOffset);
-            range.setEnd(textRange.endNode, textRange.endOffset);
-
-            // 尝试获取原文的样式
-            const parentElement = textRange.startNode.parentElement;
-            let computedStyle: CSSStyleDeclaration | null = null;
-
-            if (parentElement) {
-                try {
-                    computedStyle = window.getComputedStyle(parentElement);
-                } catch (error) {
-                    console.warn("获取原文样式失败:", error);
-                }
-            }
-
-            range.deleteContents();
-
-            // 创建带红色样式的 span 元素，保留原格式
-            const span = document.createElement("span");
-            span.style.color = "#FF0000";
-
-            // 尝试复制原文的样式（除了颜色）
-            if (computedStyle) {
-                try {
-                    // 复制字体相关样式
-                    if (computedStyle.fontFamily) {
-                        span.style.fontFamily = computedStyle.fontFamily;
-                    }
-                    if (computedStyle.fontSize) {
-                        span.style.fontSize = computedStyle.fontSize;
-                    }
-                    if (computedStyle.fontWeight && computedStyle.fontWeight !== "400") {
-                        span.style.fontWeight = computedStyle.fontWeight;
-                    }
-                    if (computedStyle.fontStyle && computedStyle.fontStyle !== "normal") {
-                        span.style.fontStyle = computedStyle.fontStyle;
-                    }
-                    if (
-                        computedStyle.textDecoration &&
-                        computedStyle.textDecoration !== "none"
-                    ) {
-                        // 保留下划线等装饰，但不包括颜色
-                        const decorations = computedStyle.textDecoration.split(" ");
-                        const decorationLine = decorations.find(
-                            (d) =>
-                                d === "underline" || d === "overline" || d === "line-through"
-                        );
-                        if (decorationLine) {
-                            span.style.textDecoration = decorationLine;
-                        }
-                    }
-                    if (
-                        computedStyle.letterSpacing &&
-                        computedStyle.letterSpacing !== "normal"
-                    ) {
-                        span.style.letterSpacing = computedStyle.letterSpacing;
-                    }
-                    if (
-                        computedStyle.backgroundColor &&
-                        computedStyle.backgroundColor !== "rgba(0, 0, 0, 0)" &&
-                        computedStyle.backgroundColor !== "transparent"
-                    ) {
-                        span.style.backgroundColor = computedStyle.backgroundColor;
-                    }
-                } catch (error) {
-                    console.warn("复制样式失败:", error);
-                }
-            }
-
-            span.textContent = replaceText;
-            range.insertNode(span);
-
-            range.setStartAfter(span);
-            range.collapse(true);
-
-            const selection = window.getSelection();
-            if (selection) {
-                selection.removeAllRanges();
-                selection.addRange(range);
-            }
-
-            // 滚动到视图
-            span.scrollIntoView({
-                behavior: "smooth",
-                block: "center",
-            });
-
-            return true;
-        } catch (e) {
-            console.error("替换失败:", e);
-            return false;
-        }
     }
 
     return false;

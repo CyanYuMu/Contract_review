@@ -22,6 +22,7 @@ type TopbarTabsProps = {
     onLoginClick?: () => void;
     onLogoutClick?: () => void;
     activeTab?: TabType | null;
+    onTabClick?: (tab: TabType) => void;
 };
 
 export default function TopbarTabs({
@@ -29,6 +30,7 @@ export default function TopbarTabs({
                                        onLoginClick,
                                        onLogoutClick,
                                        activeTab: externalActiveTab,
+                                       onTabClick,
                                    }: TopbarTabsProps) {
     const [popoverOpen, setPopoverOpen] = useState(false);
     const activeTab = externalActiveTab ?? null;
@@ -36,6 +38,29 @@ export default function TopbarTabs({
 
     // 点击标签时进行路由跳转
     const handleTabClick = (tab: TabType) => {
+        if (onTabClick) {
+            onTabClick(tab);
+            return;
+        }
+
+        if (
+            tab === "check" &&
+            typeof window !== "undefined" &&
+            window.localStorage.getItem("review_workspace_active") === "1"
+        ) {
+            router.push("/review");
+            return;
+        }
+
+        if (
+            tab === "contrast" &&
+            typeof window !== "undefined" &&
+            window.localStorage.getItem("contrast_workspace_active") === "1"
+        ) {
+            router.push("/result");
+            return;
+        }
+
         router.push(tabRoutes[tab]);
     };
 

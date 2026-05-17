@@ -1,5 +1,5 @@
 "use client";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {Modal, UploadFile, UploadProps} from "antd";
 import { Button, Upload } from "antd";
 import toast from "react-hot-toast";
@@ -35,6 +35,21 @@ export default function ContractContrastUploader({
   const [uploadingFileName, setUploadingFileName] = useState<string | null>(null);
 
   const { setOriginalFile, setComparisonFile } = ContrastuploadStore();
+  const storedFile = ContrastuploadStore((state) =>
+    isOriginal ? state.originalFile : state.comparisonFile
+  );
+
+  useEffect(() => {
+    if (storedFile.title) {
+      setUploadedFileName(storedFile.title);
+      return;
+    }
+
+    if (!storedFile.file_id && !storedFile.file_url) {
+      setUploadedFileName(null);
+      setFileList([]);
+    }
+  }, [storedFile.file_id, storedFile.file_url, storedFile.title]);
 
   const isDocxFile = (file: File | UploadFile) => {
     const fileName = "name" in file ? file.name : "";
@@ -83,6 +98,8 @@ export default function ContractContrastUploader({
       const title = uploadResult.data.title || fileObj.name;
       const file_type = uploadResult.data.file_type || fileObj.type;
 
+      setUploadedFileName(title);
+
       const reader = new FileReader();
       reader.onload = () => {
         const file_url = reader.result as string;
@@ -130,7 +147,6 @@ export default function ContractContrastUploader({
       };
       reader.readAsDataURL(fileObj);
 
-      setUploadedFileName(title);
       setProgress(100);
       setTimeout(() => {
         setUploading(false);
