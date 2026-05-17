@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"contract_review/app/internal/global"
 	"contract_review/app/internal/middleware"
@@ -57,7 +58,7 @@ func (ch *ContractHandler) UploadContractFile(ctx context.Context, c *app.Reques
 	}
 
 	// 4. 确保上传目录存在
-	uploadDir := "uploads"
+	uploadDir := UploadDir()
 	if err := os.MkdirAll(uploadDir, 0755); err != nil {
 		global.Log.Error("创建上传目录失败")
 		c.JSON(500, response.ServerError())
@@ -84,7 +85,7 @@ func (ch *ContractHandler) UploadContractFile(ctx context.Context, c *app.Reques
 	resp := UploadContractResponse{
 		FileID:         contractDetail.ID,
 		Title:          contractDetail.Title,
-		FilePathURL:    contractDetail.FilePath,
+		FilePathURL:    StaticFileURL(contractDetail.FilePath),
 		FileType:       contractDetail.FileType,
 		ContractTypeID: contractDetail.TypeID,
 		PartyA:         contractDetail.PartyA,
@@ -232,23 +233,20 @@ func (ch *ContractHandler) CreateContractType(ctx context.Context, c *app.Reques
 		return
 	}
 
-	if req.Name == "" {
+	name := normalizeContractTypeName(req.Name, req.ContractTypeName)
+	if name == "" {
 		c.JSON(400, response.FailWithMsg("类型名称不能为空"))
 		return
 	}
 
-	contractType, err := ch.contractService.CreateContractType(ctx, req.Name)
+	creator := middleware.GetCurrentUserID(c)
+	contractType, err := ch.contractService.CreateContractType(ctx, name, req.TemplateContent, creator)
 	if err != nil {
 		c.JSON(400, response.FailWithMsg(err.Error()))
 		return
 	}
 
-	c.JSON(200, response.OkWithData(ContractTypeResponse{
-		ID:        contractType.ID,
-		Name:      contractType.Name,
-		CreatedAt: contractType.CreatedAt.Format("2006-01-02 15:04:05"),
-		UpdatedAt: contractType.UpdatedAt.Format("2006-01-02 15:04:05"),
-	}))
+	c.JSON(200, response.OkWithData(ch.contractTypeToResponse(contractType)))
 }
 
 // GetContractType 获取合同类型详情
@@ -275,13 +273,9 @@ func (ch *ContractHandler) GetContractType(ctx context.Context, c *app.RequestCo
 	// 获取使用数量
 	count, _ := ch.contractService.GetContractTypeUsageCount(ctx, id)
 
-	c.JSON(200, response.OkWithData(ContractTypeDetailResponse{
-		ID:            contractType.ID,
-		Name:          contractType.Name,
-		CreatedAt:     contractType.CreatedAt.Format("2006-01-02 15:04:05"),
-		UpdatedAt:     contractType.UpdatedAt.Format("2006-01-02 15:04:05"),
-		ContractCount: count,
-	}))
+	resp := ch.contractTypeToDetailResponse(contractType)
+	resp.ContractCount = count
+	c.JSON(200, response.OkWithData(resp))
 }
 
 // ListContractTypes 获取合同类型列表
@@ -294,10 +288,14 @@ func (ch *ContractHandler) GetContractType(ctx context.Context, c *app.RequestCo
 // @Router /api/contract-type/list [get]
 func (ch *ContractHandler) ListContractTypes(ctx context.Context, c *app.RequestContext) {
 	pageStr := c.DefaultQuery("page", "")
-	pageSizeStr := c.DefaultQuery("page_size", "")
+	pageSizeStr := c.DefaultQuery("page_size", c.DefaultQuery("pageSize", ""))
+	name := c.DefaultQuery("contractTypeName", c.DefaultQuery("name", ""))
+	creator := c.DefaultQuery("creator", "")
+	startDate := c.DefaultQuery("startDate", "")
+	endDate := c.DefaultQuery("endDate", "")
 
 	// 如果没有分页参数，返回所有类型
-	if pageStr == "" && pageSizeStr == "" {
+	if pageStr == "" && pageSizeStr == "" && name == "" && creator == "" && startDate == "" && endDate == "" {
 		types, err := ch.contractService.ListContractTypes(ctx)
 		if err != nil {
 			c.JSON(500, response.ServerError())
@@ -306,12 +304,7 @@ func (ch *ContractHandler) ListContractTypes(ctx context.Context, c *app.Request
 
 		var list []ContractTypeResponse
 		for _, t := range types {
-			list = append(list, ContractTypeResponse{
-				ID:        t.ID,
-				Name:      t.Name,
-				CreatedAt: t.CreatedAt.Format("2006-01-02 15:04:05"),
-				UpdatedAt: t.UpdatedAt.Format("2006-01-02 15:04:05"),
-			})
+			list = append(list, ch.contractTypeToResponse(&t))
 		}
 
 		c.JSON(200, response.OkWithData(map[string]interface{}{
@@ -323,7 +316,7 @@ func (ch *ContractHandler) ListContractTypes(ctx context.Context, c *app.Request
 
 	// 分页查询
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", c.DefaultQuery("pageSize", "20")))
 
 	if page < 1 {
 		page = 1
@@ -332,7 +325,7 @@ func (ch *ContractHandler) ListContractTypes(ctx context.Context, c *app.Request
 		pageSize = 20
 	}
 
-	types, total, err := ch.contractService.ListContractTypesPaginated(ctx, page, pageSize)
+	types, total, err := ch.contractService.ListContractTypesFiltered(ctx, name, creator, startDate, endDate, page, pageSize)
 	if err != nil {
 		c.JSON(500, response.ServerError())
 		return
@@ -340,12 +333,7 @@ func (ch *ContractHandler) ListContractTypes(ctx context.Context, c *app.Request
 
 	var list []ContractTypeResponse
 	for _, t := range types {
-		list = append(list, ContractTypeResponse{
-			ID:        t.ID,
-			Name:      t.Name,
-			CreatedAt: t.CreatedAt.Format("2006-01-02 15:04:05"),
-			UpdatedAt: t.UpdatedAt.Format("2006-01-02 15:04:05"),
-		})
+		list = append(list, ch.contractTypeToResponse(&t))
 	}
 
 	c.JSON(200, response.OkWithData(map[string]interface{}{
@@ -353,6 +341,7 @@ func (ch *ContractHandler) ListContractTypes(ctx context.Context, c *app.Request
 		"total":     total,
 		"page":      page,
 		"page_size": pageSize,
+		"pageSize":  pageSize,
 	}))
 }
 
@@ -379,17 +368,92 @@ func (ch *ContractHandler) UpdateContractTypeName(ctx context.Context, c *app.Re
 		return
 	}
 
-	if req.Name == "" {
+	name := normalizeContractTypeName(req.Name, req.ContractTypeName)
+	if name == "" {
 		c.JSON(400, response.FailWithMsg("类型名称不能为空"))
 		return
 	}
 
-	if err := ch.contractService.UpdateContractType(ctx, id, req.Name); err != nil {
+	if err := ch.contractService.UpdateContractType(ctx, id, name, req.TemplateContent); err != nil {
 		c.JSON(400, response.FailWithMsg(err.Error()))
 		return
 	}
 
 	c.JSON(200, response.Ok())
+}
+
+// BatchDeleteContractType 批量删除合同类型
+func (ch *ContractHandler) BatchDeleteContractType(ctx context.Context, c *app.RequestContext) {
+	var req struct {
+		IDs []uint64 `json:"ids"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(400, response.FailWithMsg("请求参数错误"))
+		return
+	}
+	if len(req.IDs) == 0 {
+		c.JSON(400, response.FailWithMsg("请选择要删除的合同类型"))
+		return
+	}
+	if err := ch.contractService.DeleteContractTypes(ctx, req.IDs); err != nil {
+		c.JSON(400, response.FailWithMsg(err.Error()))
+		return
+	}
+	c.JSON(200, response.Ok())
+}
+
+// ListContractTypeCreators 获取合同类型创建人列表
+func (ch *ContractHandler) ListContractTypeCreators(ctx context.Context, c *app.RequestContext) {
+	creators, err := ch.contractService.ListContractTypeCreators(ctx)
+	if err != nil {
+		c.JSON(500, response.ServerError())
+		return
+	}
+	list := make([]ContractTypeCreatorResponse, 0, len(creators))
+	for _, creator := range creators {
+		list = append(list, ContractTypeCreatorResponse{
+			ID:   creator,
+			Name: creator,
+		})
+	}
+	c.JSON(200, response.OkWithData(list))
+}
+
+func normalizeContractTypeName(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func (ch *ContractHandler) contractTypeToResponse(contractType *ContractType) ContractTypeResponse {
+	updatedAt := contractType.UpdatedAt.Format("2006-01-02 15:04:05")
+	return ContractTypeResponse{
+		ID:               contractType.ID,
+		Name:             contractType.Name,
+		ContractTypeName: contractType.Name,
+		TemplateContent:  contractType.TemplateContent,
+		Creator:          contractType.Creator,
+		CreatedAt:        contractType.CreatedAt.Format("2006-01-02 15:04:05"),
+		UpdatedAt:        updatedAt,
+		UpdateDate:       updatedAt,
+	}
+}
+
+func (ch *ContractHandler) contractTypeToDetailResponse(contractType *ContractType) ContractTypeDetailResponse {
+	updatedAt := contractType.UpdatedAt.Format("2006-01-02 15:04:05")
+	return ContractTypeDetailResponse{
+		ID:               contractType.ID,
+		Name:             contractType.Name,
+		ContractTypeName: contractType.Name,
+		TemplateContent:  contractType.TemplateContent,
+		Creator:          contractType.Creator,
+		CreatedAt:        contractType.CreatedAt.Format("2006-01-02 15:04:05"),
+		UpdatedAt:        updatedAt,
+		UpdateDate:       updatedAt,
+	}
 }
 
 // DeleteContractType 删除合同类型

@@ -62,3 +62,75 @@ SELECT `id`, 0, `content`, NOW(3) FROM `review_knowledge_docs` WHERE `title` = '
 
 INSERT INTO `review_knowledge_chunks` (`doc_id`, `chunk_index`, `content`, `created_at`)
 SELECT `id`, 0, `content`, NOW(3) FROM `review_knowledge_docs` WHERE `title` = '民法典合同编（摘录示例）';
+
+-- 更完整的通用审阅知识种子：用于提升中文关键词 RAG 召回。
+-- 可重复执行；通过 title 去重插入。
+INSERT INTO `review_knowledge_docs`
+  (`title`, `category`, `sub_category`, `source`, `content`, `chunk_count`, `status`, `created_at`, `updated_at`)
+SELECT * FROM (
+  SELECT
+    '通用合同核心条款审阅指引' AS `title`,
+    '规范' AS `category`,
+    '通用' AS `sub_category`,
+    '内部审阅指引' AS `source`,
+    '合同应明确合同主体、标的或服务范围、交付成果、验收标准、付款节点、发票义务、违约责任、解除终止、保密、知识产权、争议解决和管辖。缺少核心条款或表述不清，会导致履约、验收、付款和争议解决风险。' AS `content`,
+    1 AS `chunk_count`,
+    'indexed' AS `status`,
+    NOW(3) AS `created_at`,
+    NOW(3) AS `updated_at`
+  UNION ALL SELECT
+    '服务类合同审阅指引',
+    '规范',
+    '服务类合同',
+    '内部审阅指引',
+    '服务类合同应重点审查服务内容是否具体、交付物是否可验收、服务期限和里程碑是否明确、质量标准和整改期限是否清楚、费用支付是否与验收挂钩、成果知识产权归属是否明确。仅以附件笼统描述服务内容或缺少验收标准，容易产生争议。',
+    1,
+    'indexed',
+    NOW(3),
+    NOW(3)
+  UNION ALL SELECT
+    '违约责任审阅指引',
+    '规范',
+    '通用',
+    '内部审阅指引',
+    '违约责任应覆盖逾期付款、逾期交付、质量不合格、拒不整改、擅自解除、泄密、知识产权侵权等主要违约场景。违约金、损失赔偿、继续履行和解除权应与主要义务对应。仅约定一方责任、责任过轻或责任缺失，会对相对方不利。',
+    1,
+    'indexed',
+    NOW(3),
+    NOW(3)
+  UNION ALL SELECT
+    '知识产权与保密审阅指引',
+    '规范',
+    '通用',
+    '内部审阅指引',
+    '涉及软件、网站、设计、文案、数据、方案等成果的合同，应明确成果知识产权归属、使用范围、第三方侵权责任、源文件或交付材料范围。保密条款应明确保密信息范围、保密期限、例外情形和违约责任。',
+    1,
+    'indexed',
+    NOW(3),
+    NOW(3)
+  UNION ALL SELECT
+    '争议解决条款审阅指引',
+    '规范',
+    '通用',
+    '内部审阅指引',
+    '争议解决条款应明确适用法律、管辖法院或仲裁机构。约定仲裁时应写明准确的仲裁委员会名称；约定诉讼时应明确有管辖连接点的法院。管辖地不明、仲裁机构不存在或同时约定诉讼和仲裁，可能影响条款效力并增加维权成本。',
+    1,
+    'indexed',
+    NOW(3),
+    NOW(3)
+) AS seed
+WHERE NOT EXISTS (
+  SELECT 1 FROM `review_knowledge_docs` d WHERE d.`title` = seed.`title`
+);
+
+INSERT INTO `review_knowledge_chunks` (`doc_id`, `chunk_index`, `content`, `created_at`)
+SELECT d.`id`, 0, d.`content`, NOW(3)
+FROM `review_knowledge_docs` d
+LEFT JOIN `review_knowledge_chunks` c ON c.`doc_id` = d.`id` AND c.`chunk_index` = 0
+WHERE d.`title` IN (
+  '通用合同核心条款审阅指引',
+  '服务类合同审阅指引',
+  '违约责任审阅指引',
+  '知识产权与保密审阅指引',
+  '争议解决条款审阅指引'
+) AND c.`id` IS NULL;

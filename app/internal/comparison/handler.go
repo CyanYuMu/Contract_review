@@ -33,13 +33,12 @@ func NewComparisonHandler(comparisonService *ComparisonService) *ComparisonHandl
 // @Router /api/comparison/start [post]
 func (h *ComparisonHandler) StartComparison(ctx context.Context, c *app.RequestContext) {
 	// 1. 验证用户登录状态
-	userIDStr := middleware.GetCurrentUserID(c)
-	if userIDStr == "" {
+	account := middleware.GetCurrentUserID(c)
+	if account == "" {
 		global.Log.Error("用户未登录")
 		c.JSON(401, response.Unauthorized())
 		return
 	}
-	userID, _ := strconv.ParseUint(userIDStr, 10, 64)
 
 	// 2. 绑定请求参数
 	var req StartComparisonRequest
@@ -56,7 +55,7 @@ func (h *ComparisonHandler) StartComparison(ctx context.Context, c *app.RequestC
 	}
 
 	// 4. 调用服务层执行比对
-	result, err := h.comparisonService.StartComparison(ctx, userID, &req)
+	result, err := h.comparisonService.StartComparison(ctx, account, &req)
 	if err != nil {
 		global.Log.Error("比对任务执行失败", zap.Error(err))
 		c.JSON(500, response.FailWithMsg(err.Error()))
@@ -137,12 +136,11 @@ func (h *ComparisonHandler) GetComparisonTaskBySession(ctx context.Context, c *a
 // @Success 200 {object} ComparisonTaskListResponse
 // @Router /api/comparison/tasks [get]
 func (h *ComparisonHandler) ListComparisonTasks(ctx context.Context, c *app.RequestContext) {
-	userIDStr := middleware.GetCurrentUserID(c)
-	if userIDStr == "" {
+	account := middleware.GetCurrentUserID(c)
+	if account == "" {
 		c.JSON(401, response.Unauthorized())
 		return
 	}
-	userID, _ := strconv.ParseUint(userIDStr, 10, 64)
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
@@ -154,7 +152,7 @@ func (h *ComparisonHandler) ListComparisonTasks(ctx context.Context, c *app.Requ
 		pageSize = 10
 	}
 
-	tasks, total, err := h.comparisonService.ListUserComparisonTasks(ctx, userID, page, pageSize)
+	tasks, total, err := h.comparisonService.ListUserComparisonTasks(ctx, account, page, pageSize)
 	if err != nil {
 		c.JSON(500, response.ServerError())
 		return

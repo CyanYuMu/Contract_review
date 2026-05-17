@@ -17,7 +17,7 @@ interface LoginModalProps {
 export default function LoginModal({visible, onCancel, onSuccess, onSwitchToRegister}: LoginModalProps) {
     const [loading, setLoading] = useState(false);
 
-    const handleLogin = async (values: { identifier: string, password: string }) => {
+    const handleLogin = async (values: { account: string, password: string }) => {
         try {
             setLoading(true);
             const response = await login(values);
@@ -98,7 +98,7 @@ export default function LoginModal({visible, onCancel, onSuccess, onSwitchToRegi
 
                     <Form layout="vertical" onFinish={handleLogin} requiredMark={false}>
                         <Form.Item
-                            name="identifier"
+                            name="account"
                             label="用户名"
                             rules={[
                                 {required: true, message: '请输入用户名'},

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strconv"
 
 	"contract_review/app/internal/contract"
@@ -47,7 +46,6 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 		c.JSON(401, response.Unauthorized())
 		return
 	}
-	userID, _ := strconv.ParseUint(userIDStr, 10, 64)
 
 	// 2. 绑定请求参数
 	var req CreateReviewTaskRequest
@@ -73,7 +71,7 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 	c.Response.Header.Set("X-Accel-Buffering", "no")
 
 	// 5. 创建审阅任务
-	task, err := h.reviewService.CreateReviewTask(ctx, userID, &req)
+	task, err := h.reviewService.CreateReviewTask(ctx, userIDStr, &req)
 	if err != nil {
 		global.Log.Error("创建审阅任务失败", zap.Error(err))
 		h.sendSSEError(c, err.Error())
@@ -88,27 +86,15 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 		return
 	}
 
-	// 检查合同状态
-	if contractInfo.Status == "uploaded" {
-		h.sendSSEError(c, "当前文件为上传文件，不支持审阅")
-		return
-	}
-
 	// 7. 读取合同内容
 	var contractContent string
 	if contractInfo.FilePath != "" {
-		// 从文件读取
-		content, err := os.ReadFile(contractInfo.FilePath)
+		filePath := contract.LocalFilePath(contractInfo.FilePath)
+		contractContent, err = utils.ExtractText(filePath)
 		if err != nil {
-			// 尝试使用文档提取工具
-			contractContent, err = utils.ExtractText(contractInfo.FilePath)
-			if err != nil {
-				global.Log.Error("读取合同内容失败", zap.Error(err))
-				h.sendSSEError(c, "读取合同内容失败")
-				return
-			}
-		} else {
-			contractContent = string(content)
+			global.Log.Error("提取合同内容失败", zap.String("filePath", filePath), zap.Error(err))
+			h.sendSSEError(c, "读取合同内容失败")
+			return
 		}
 	}
 
@@ -412,7 +398,7 @@ func (h *ReviewHandler) sendSSEError(c *app.RequestContext, message string) {
 // taskToResponse 将ReviewTask转换为响应结构
 func (h *ReviewHandler) taskToResponse(task *ReviewTask) ReviewTaskResponse {
 	completedAt := ""
-	if !task.CompletedAt.IsZero() {
+	if task.CompletedAt != nil && !task.CompletedAt.IsZero() {
 		completedAt = task.CompletedAt.Format("2006-01-02 15:04:05")
 	}
 

@@ -16,6 +16,7 @@ import (
 	"contract_review/app/pkg/utils"
 
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 type ContractService struct {
@@ -167,26 +168,24 @@ func (cs *ContractService) FileLoad(ctx context.Context, account string, filePat
 	// 5. 获取文件类型
 	fileType := utils.GetFileType(filename)
 
-	// 6. 尝试匹配合同类型
-	var typeID uint64 = 0
-	if info.Type != "" {
-		contractType, err := cs.contractRepo.GetContractTypeByName(ctx, info.Type)
-		if err == nil && contractType != nil {
-			typeID = contractType.ID
-		}
+	// 6. 尝试匹配合同类型；未匹配时使用默认类型，避免 type_id=0 触发外键失败。
+	typeID, err := cs.ensureContractTypeID(ctx, info.Type)
+	if err != nil {
+		global.Log.Error("获取合同类型失败", zap.Error(err))
+		return Contract{}, errors.New("保存合同类型失败：" + err.Error())
 	}
 
 	// 7. 构建合同记录
 	contract := Contract{
 		Account:    account,
 		TypeID:     typeID,
-		Title:      filename,
-		FilePath:   filePath,
-		FileType:   fileType,
+		Title:      limitString(filename, 256),
+		FilePath:   limitString(filePath, 512),
+		FileType:   limitString(fileType, 16),
 		UploadTime: time.Now(),
 		Status:     "uploaded",
-		PartyA:     info.PartyA,
-		PartyB:     info.PartyB,
+		PartyA:     limitString(info.PartyA, 128),
+		PartyB:     limitString(info.PartyB, 128),
 		Amount:     amount,
 		IsAccepted: 0,
 	}
@@ -204,6 +203,57 @@ func (cs *ContractService) FileLoad(ctx context.Context, account string, filePat
 		zap.Float64("amount", contract.Amount))
 
 	return contract, nil
+}
+
+func (cs *ContractService) ensureContractTypeID(ctx context.Context, typeName string) (uint64, error) {
+	name := strings.TrimSpace(typeName)
+	if name == "" {
+		name = "其他"
+	}
+	name = limitString(name, 64)
+
+	contractType, err := cs.contractRepo.GetContractTypeByName(ctx, name)
+	if err == nil && contractType != nil {
+		return contractType.ID, nil
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, err
+	}
+
+	contractType = &ContractType{Name: name}
+	if err := cs.contractRepo.CreateContractType(ctx, contractType); err != nil {
+		existing, getErr := cs.contractRepo.GetContractTypeByName(ctx, name)
+		if getErr == nil && existing != nil {
+			return existing.ID, nil
+		}
+		defaultType, defaultErr := cs.ensureDefaultContractType(ctx)
+		if defaultErr != nil {
+			return 0, err
+		}
+		return defaultType.ID, nil
+	}
+	return contractType.ID, nil
+}
+
+func (cs *ContractService) ensureDefaultContractType(ctx context.Context) (*ContractType, error) {
+	const defaultTypeName = "其他"
+	contractType, err := cs.contractRepo.GetContractTypeByName(ctx, defaultTypeName)
+	if err == nil && contractType != nil {
+		return contractType, nil
+	}
+	contractType = &ContractType{Name: defaultTypeName}
+	if err := cs.contractRepo.CreateContractType(ctx, contractType); err != nil {
+		return nil, err
+	}
+	return contractType, nil
+}
+
+func limitString(value string, max int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= max {
+		return string(runes)
+	}
+	return string(runes[:max])
 }
 
 // GetContractByID 根据ID获取合同
@@ -269,8 +319,9 @@ func (cs *ContractService) DeleteContract(ctx context.Context, id uint64) error 
 
 	// 尝试删除文件（不影响返回结果）
 	if contract.FilePath != "" {
-		if err := os.Remove(contract.FilePath); err != nil {
-			global.Log.Warn("删除合同文件失败", zap.String("filePath", contract.FilePath), zap.Error(err))
+		filePath := LocalFilePath(contract.FilePath)
+		if err := os.Remove(filePath); err != nil {
+			global.Log.Warn("删除合同文件失败", zap.String("filePath", filePath), zap.Error(err))
 		}
 	}
 
@@ -285,17 +336,22 @@ func (cs *ContractService) GetContractFilePath(ctx context.Context, id uint64) (
 	}
 
 	// 检查文件是否存在
-	if _, err := os.Stat(contract.FilePath); os.IsNotExist(err) {
+	filePath := LocalFilePath(contract.FilePath)
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return "", "", errors.New("文件不存在")
 	}
 
-	return contract.FilePath, contract.Title, nil
+	return filePath, contract.Title, nil
 }
 
 // ============ ContractType 相关服务 ============
 
 // CreateContractType 创建合同类型
-func (cs *ContractService) CreateContractType(ctx context.Context, name string) (*ContractType, error) {
+func (cs *ContractService) CreateContractType(ctx context.Context, name, templateContent, creator string) (*ContractType, error) {
+	name = limitString(name, 64)
+	templateContent = limitString(templateContent, 5000)
+	creator = limitString(creator, 64)
+
 	// 检查名称是否已存在
 	exists, err := cs.contractRepo.ExistsContractTypeByName(ctx, name)
 	if err != nil {
@@ -306,9 +362,11 @@ func (cs *ContractService) CreateContractType(ctx context.Context, name string) 
 	}
 
 	contractType := &ContractType{
-		Name:      name,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		Name:            name,
+		TemplateContent: templateContent,
+		Creator:         creator,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
 	}
 
 	if err := cs.contractRepo.CreateContractType(ctx, contractType); err != nil {
@@ -339,8 +397,17 @@ func (cs *ContractService) ListContractTypesPaginated(ctx context.Context, page,
 	return cs.contractRepo.ListContractTypesPaginated(ctx, offset, pageSize)
 }
 
+// ListContractTypesFiltered 分页筛选合同类型
+func (cs *ContractService) ListContractTypesFiltered(ctx context.Context, name, creator, startDate, endDate string, page, pageSize int) ([]ContractType, int64, error) {
+	offset := (page - 1) * pageSize
+	return cs.contractRepo.ListContractTypesFiltered(ctx, name, creator, startDate, endDate, offset, pageSize)
+}
+
 // UpdateContractType 更新合同类型
-func (cs *ContractService) UpdateContractType(ctx context.Context, id uint64, name string) error {
+func (cs *ContractService) UpdateContractType(ctx context.Context, id uint64, name, templateContent string) error {
+	name = limitString(name, 64)
+	templateContent = limitString(templateContent, 5000)
+
 	// 检查类型是否存在
 	exists, err := cs.contractRepo.ExistsContractType(ctx, id)
 	if err != nil {
@@ -357,14 +424,25 @@ func (cs *ContractService) UpdateContractType(ctx context.Context, id uint64, na
 	}
 
 	return cs.contractRepo.UpdateContractTypeByID(ctx, id, map[string]interface{}{
-		"name":       name,
-		"updated_at": time.Now(),
+		"name":             name,
+		"template_content": templateContent,
+		"updated_at":       time.Now(),
 	})
 }
 
 // DeleteContractType 删除合同类型
 func (cs *ContractService) DeleteContractType(ctx context.Context, id uint64) error {
 	return cs.contractRepo.DeleteContractType(ctx, id)
+}
+
+// DeleteContractTypes 批量删除合同类型
+func (cs *ContractService) DeleteContractTypes(ctx context.Context, ids []uint64) error {
+	return cs.contractRepo.DeleteContractTypes(ctx, ids)
+}
+
+// ListContractTypeCreators 获取合同类型创建者列表
+func (cs *ContractService) ListContractTypeCreators(ctx context.Context) ([]string, error) {
+	return cs.contractRepo.ListContractTypeCreators(ctx)
 }
 
 // GetContractTypeUsageCount 获取合同类型使用数量

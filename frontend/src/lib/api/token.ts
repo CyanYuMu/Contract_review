@@ -1,12 +1,12 @@
 import axios from 'axios';
-import type { RefreshTokenRequest, TokenResponse } from '@/lib/Interface';
+import type { TokenResponse } from '@/lib/Interface';
 import type { AxiosError } from 'axios';
 
 
 export const refreshToken = async (refreshToken: string): Promise<TokenResponse> => {
     try {
-        const response = await axios.post('/api/proxy/user/refresh_token', {
-        // const response = await axios.post('/api/user/refresh_token', {
+        const response = await axios.post('/user/refresh_token', {
+        // const response = await axios.post('/user/refresh_token', {
             refresh_token: refreshToken
         }, {
             // baseURL: '/api',
@@ -17,11 +17,17 @@ export const refreshToken = async (refreshToken: string): Promise<TokenResponse>
         });
         
         // 检查响应格式
-        if (response.data?.code !== 0 || !response.data?.data?.access_token) {
+        if (response.data?.code !== 200 || !response.data?.data?.access_token) {
             throw new Error('刷新token失败，响应格式错误');
         }
-        
-        return response.data.data;
+
+        // 适配后端返回格式，补充默认值
+        return {
+            access_token: response.data.data.access_token,
+            token_type: 'Bearer',
+            refresh_token: refreshToken, // 后端刷新接口不返回新的refresh_token，继续使用旧的
+            expires_in: response.data.data.expires_in
+        };
     } catch (error) {
         const axiosErr = error as AxiosError<{ message?: string; msg?: string }>;
         

@@ -105,12 +105,13 @@ export default function ReviewHistory({ type = "Review", onTypeChange, onViewRec
                 const totalCount = res?.data?.total ?? list.length;
                 const normalized = normalize(
                     list.map((item: any, idx: number) => ({
-                        id: item.id ?? idx + 1,
-                        title: item.title,
+                        id: item.session_id ?? item.id ?? idx + 1,
+                        title: item.title || item.file_name || "未命名合同",
+                        session_type: item.session_type,
                         created_at: item.created_at,
                         partyA: item.party_a || "未明确",
                         partyB: item.party_b || "未明确",
-                        type: item.type,
+                        type: item.type || item.contract_type || "未明确",
                         status: parseAccepted(item.is_accepted ?? item.status),
                         is_accepted: parseAccepted(item.is_accepted),
                         file_path: buildStaticFileUrl(item.file_path ?? ""),

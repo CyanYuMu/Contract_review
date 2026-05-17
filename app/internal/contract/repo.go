@@ -3,6 +3,7 @@ package contract
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"contract_review/app/internal/global"
 
@@ -25,7 +26,7 @@ func (r *ContractRepo) CreateContract(ctx context.Context, contract *Contract) e
 	err := r.db.WithContext(ctx).Create(contract).Error
 	if err != nil {
 		global.Log.Error("ContractRepo.CreateContract failed", zap.Error(err))
-		return errors.New("create contract failed")
+		return err
 	}
 	return nil
 }
@@ -220,7 +221,7 @@ func (r *ContractRepo) CreateContractType(ctx context.Context, contractType *Con
 	err := r.db.WithContext(ctx).Create(contractType).Error
 	if err != nil {
 		global.Log.Error("ContractRepo.CreateContractType failed", zap.Error(err))
-		return errors.New("create contract type failed")
+		return err
 	}
 	return nil
 }
@@ -274,6 +275,51 @@ func (r *ContractRepo) ListContractTypesPaginated(ctx context.Context, offset, l
 	return contractTypes, count, err
 }
 
+// ListContractTypesFiltered 分页获取合同类型列表（支持名称、创建者和更新时间筛选）
+func (r *ContractRepo) ListContractTypesFiltered(ctx context.Context, name, creator, startDate, endDate string, offset, limit int) ([]ContractType, int64, error) {
+	var contractTypes []ContractType
+	var count int64
+
+	query := r.db.WithContext(ctx).Model(&ContractType{})
+	if name = strings.TrimSpace(name); name != "" {
+		query = query.Where("name LIKE ?", "%"+name+"%")
+	}
+	if creator = strings.TrimSpace(creator); creator != "" {
+		query = query.Where("creator LIKE ?", "%"+creator+"%")
+	}
+	if startDate = strings.TrimSpace(startDate); startDate != "" {
+		query = query.Where("DATE(updated_at) >= ?", startDate)
+	}
+	if endDate = strings.TrimSpace(endDate); endDate != "" {
+		query = query.Where("DATE(updated_at) <= ?", endDate)
+	}
+
+	if err := query.Count(&count).Error; err != nil {
+		global.Log.Error("ContractRepo.ListContractTypesFiltered count failed", zap.Error(err))
+		return nil, 0, err
+	}
+
+	err := query.Offset(offset).Limit(limit).Order("updated_at DESC, created_at DESC").Find(&contractTypes).Error
+	if err != nil {
+		global.Log.Error("ContractRepo.ListContractTypesFiltered find failed", zap.Error(err))
+	}
+	return contractTypes, count, err
+}
+
+// ListContractTypeCreators 获取合同类型创建人列表
+func (r *ContractRepo) ListContractTypeCreators(ctx context.Context) ([]string, error) {
+	var creators []string
+	err := r.db.WithContext(ctx).Model(&ContractType{}).
+		Where("creator <> ''").
+		Distinct("creator").
+		Order("creator ASC").
+		Pluck("creator", &creators).Error
+	if err != nil {
+		global.Log.Error("ContractRepo.ListContractTypeCreators failed", zap.Error(err))
+	}
+	return creators, err
+}
+
 // UpdateContractType 更新合同类型
 func (r *ContractRepo) UpdateContractType(ctx context.Context, contractType *ContractType) error {
 	err := r.db.WithContext(ctx).Model(contractType).Updates(contractType).Error
@@ -310,6 +356,28 @@ func (r *ContractRepo) DeleteContractType(ctx context.Context, id uint64) error 
 	if err != nil {
 		global.Log.Error("ContractRepo.DeleteContractType failed", zap.Error(err))
 		return errors.New("delete contract type failed")
+	}
+	return nil
+}
+
+// DeleteContractTypes 批量删除合同类型
+func (r *ContractRepo) DeleteContractTypes(ctx context.Context, ids []uint64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	var count int64
+	if err := r.db.WithContext(ctx).Model(&Contract{}).Where("type_id IN ?", ids).Count(&count).Error; err != nil {
+		global.Log.Error("ContractRepo.DeleteContractTypes check failed", zap.Error(err))
+		return errors.New("check contract type usage failed")
+	}
+	if count > 0 {
+		return errors.New("选中的合同类型下存在合同，无法删除")
+	}
+
+	err := r.db.WithContext(ctx).Where("id IN ?", ids).Delete(&ContractType{}).Error
+	if err != nil {
+		global.Log.Error("ContractRepo.DeleteContractTypes failed", zap.Error(err))
+		return errors.New("delete contract types failed")
 	}
 	return nil
 }

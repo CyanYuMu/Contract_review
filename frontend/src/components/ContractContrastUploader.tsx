@@ -10,8 +10,15 @@ import { assets } from "@/assets/assets";
 import Image from "next/image";
 import "./upload-progress.css";
 
+export type UploadedContrastFile = {
+  title: string;
+  file_type: string;
+  file_url: string;
+  file_id: number;
+};
+
 type ContractContrastUploaderProps = {
-  onUploadSuccess?: () => void;
+  onUploadSuccess?: (file: UploadedContrastFile) => void;
   label?: string;
   isOriginal?: boolean;
 };
@@ -48,7 +55,6 @@ export default function ContractContrastUploader({
   };
 
   const handleFileChange = async ({
-    file,
     fileList: newFileList,
   }: { file: UploadFile; fileList: UploadFile[] }) => {
     setFileList(newFileList);
@@ -89,6 +95,10 @@ export default function ContractContrastUploader({
             file_url,
             file_id
           });
+          localStorage.setItem("original_file_url", file_url);
+          localStorage.setItem("original_file_title", title);
+          localStorage.setItem("original_file_type", file_type);
+          localStorage.setItem("original_file_id", String(file_id));
         } else {
           setComparisonFile({
             title,
@@ -96,14 +106,23 @@ export default function ContractContrastUploader({
             file_url,
             file_id
           });
+          localStorage.setItem("comparison_file_url", file_url);
+          localStorage.setItem("comparison_file_title", title);
+          localStorage.setItem("comparison_file_type", file_type);
+          localStorage.setItem("comparison_file_id", String(file_id));
         }
 
         if (onSuccess) onSuccess({}, file);
         if (onUploadSuccess) {
-          onUploadSuccess();
+          onUploadSuccess({
+            title,
+            file_type,
+            file_url,
+            file_id,
+          });
         }
       };
-      reader.onerror = (err) => {
+      reader.onerror = () => {
         toast.error("文件读取失败");
         if (onError) onError(new Error("文件读取失败"));
         setUploading(false);

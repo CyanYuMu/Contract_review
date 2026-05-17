@@ -5,24 +5,21 @@ import (
 
 	"contract_review/app/internal/agent"
 	"contract_review/app/internal/global"
+	"contract_review/app/internal/llm"
 
-	"github.com/cloudwego/eino-ext/components/model/arkbot"
+	fmodel "github.com/cloudwego/eino/components/model"
 	"go.uber.org/zap"
 )
 
 // InitLLM 初始化LLM客户端（保留原有函数）
-func InitLLM(ctx context.Context) (*arkbot.ChatModel, error) {
-	llm, err := arkbot.NewChatModel(ctx,
-		&arkbot.Config{
-			Model:  global.Config.LLMConfig.Model,
-			APIKey: global.Config.LLMConfig.APIKey,
-		})
+func InitLLM(ctx context.Context) (fmodel.BaseChatModel, error) {
+	chatModel, err := llm.NewChatModel(ctx)
 	if err != nil {
-		global.Log.Error("init arkbot model failed", zap.Error(err))
+		zap.L().Error("init chat model failed", zap.Error(err))
 		return nil, err
 	}
 
-	return llm, nil
+	return chatModel, nil
 }
 
 // InitContractAgent 初始化合同解析智能体

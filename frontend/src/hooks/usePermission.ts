@@ -42,19 +42,16 @@ export function usePermission(
   requireAll: boolean = false
 ): boolean {
   const [hasPermission, setHasPermission] = useState<boolean>(false);
-  const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
     const checkPermission = async () => {
       try {
-        setLoading(true);
-        
         // 获取用户信息（包含权限信息）
         const userInfo = await getUserInfo();
         
         // TODO: 根据实际 API 返回结构调整
         // 假设 userInfo 中包含 permissions 字段
-        const userPermissions: UserPermissions = userInfo.permissions || {};
+        const userPermissions: UserPermissions = userInfo?.permissions || {};
 
         // 判断权限
         if (Array.isArray(permission)) {
@@ -77,8 +74,6 @@ export function usePermission(
       } catch (error) {
         console.error('权限检查失败:', error);
         setHasPermission(false);
-      } finally {
-        setLoading(false);
       }
     };
 
@@ -101,7 +96,7 @@ export function usePermissions() {
       try {
         setLoading(true);
         const userInfo = await getUserInfo();
-        setPermissions(userInfo.permissions || {});
+        setPermissions(userInfo?.permissions || {});
       } catch (error) {
         console.error('获取权限失败:', error);
         setPermissions({});

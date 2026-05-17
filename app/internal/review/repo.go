@@ -4,6 +4,7 @@ import (
 	"context"
 	"contract_review/app/internal/global"
 	"errors"
+	"fmt"
 	"time"
 
 	"go.uber.org/zap"
@@ -25,7 +26,7 @@ func (r *ReviewRepo) Create(ctx context.Context, task *ReviewTask) error {
 	err := r.db.WithContext(ctx).Create(task).Error
 	if err != nil {
 		global.Log.Error("ReviewRepo.Create failed", zap.Error(err))
-		return errors.New("create review task failed")
+		return fmt.Errorf("create review task failed: %w", err)
 	}
 	return nil
 }

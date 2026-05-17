@@ -24,7 +24,8 @@ func (t *RAGSearchTool) Name() string {
 
 func (t *RAGSearchTool) Description() string {
 	return "检索审阅规范和法律条例知识库。输入查询关键词，返回相关的审阅标准、法律法规条文、风险案例和示范文本。" +
-		"当你需要验证某个风险点是否有法律依据、查找某类条款的审阅规范、或寻找标准表述时，请使用此工具。"
+		"当你需要验证某个风险点是否有法律依据、查找某类条款的审阅规范、寻找标准表述、或匹配后台配置的合同类型风险点时，请使用此工具。" +
+		"审阅特定合同时应传入 contract_type，以优先检索该合同类型的风险点配置。"
 }
 
 func (t *RAGSearchTool) Parameters() map[string]interface{} {

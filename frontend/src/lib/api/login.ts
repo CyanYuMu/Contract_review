@@ -12,6 +12,7 @@ export const login = async (data: LoginRequest) => {
             if (axiosErr.response.status === 401) {
                 throw new Error('账号或密码错误');
             }
+            throw new Error(axiosErr.response.data?.message || axiosErr.response.data?.msg || `登录失败（${axiosErr.response.status}）`);
         } else if (axiosErr.request) {
             throw new Error('网络连接失败，请检查网络');
         } else {

@@ -11,6 +11,7 @@ import {TaskStore} from "@/store/taskStore";
 import {UploadStore} from "@/store/uploadStore";
 import {RiskStore} from "@/store/riskStore";
 import {assets} from "@/assets/assets";
+import { ContractTypeListItem, getContractTypeList } from "@/lib/api/contractType";
 
 type ReviewPanelProps = {
     sessionId?: number;
@@ -67,28 +68,52 @@ export default function ReviewPanel({
 
     const [partyA, setPartyA] = useState<string>(getInitialPartyA);
     const [partyB, setPartyB] = useState<string>(getInitialPartyB);
+    const [contractTypes, setContractTypes] = useState<ContractTypeListItem[]>([]);
 
     const [hasUploadedContract, setHasUploadedContract] = useState(() => {
         const storeData = UploadStore.getState().data;
         return !!storeData?.file_url;
     });
 
-    const intensityOptions = [
-        {label: "严格", value: "严格"},
-        {label: "标准", value: "标准"},
-        {label: "宽松", value: "宽松"}
-    ]
+    const resolveDefaultContractType = useCallback((types: ContractTypeListItem[]) => {
+        const storedTypeId =
+            UploadStore.getState().data?.contract_type_id ??
+            (typeof window !== "undefined"
+                ? Number(localStorage.getItem("uploaded_contract_type_id") || 0)
+                : 0);
+        if (storedTypeId) {
+            const matched = types.find((item) => Number(item.id) === Number(storedTypeId));
+            if (matched) {
+                return matched.contractTypeName || matched.name || "";
+            }
+        }
+        return types[0]?.contractTypeName || types[0]?.name || "通用";
+    }, []);
+
+    useEffect(() => {
+        const fetchContractTypes = async () => {
+            try {
+                const response = await getContractTypeList();
+                if (response?.code === 200 && response?.data?.list) {
+                    setContractTypes(response.data.list);
+                }
+            } catch (error) {
+                console.error("获取合同类型失败:", error);
+            }
+        };
+        fetchContractTypes();
+    }, []);
 
     useEffect(() => {
         if (hasUploadedContract) {
             const currentValues = form.getFieldsValue();
             form.setFieldsValue({
                 stance: currentValues.stance || "甲方",
-                contract_type: currentValues.contract_type || "0",
+                contract_type: currentValues.contract_type || resolveDefaultContractType(contractTypes),
                 intensity: currentValues.intensity || "宽松",
             });
         }
-    }, [form, hasUploadedContract]);
+    }, [contractTypes, form, hasUploadedContract, resolveDefaultContractType]);
 
     useEffect(() => {
         const currentUploadData = UploadStore.getState().data;
@@ -199,7 +224,11 @@ export default function ReviewPanel({
             }
 
             const SessionId: number | undefined =
-                (taskData ? Number(taskData) : undefined) ?? sessionId;
+                (taskData ? Number(taskData) : undefined) ??
+                sessionId ??
+                (typeof window !== "undefined"
+                    ? Number(localStorage.getItem("review_session_id") || 0)
+                    : undefined);
             if (!SessionId) {
                 toast.error("缺少会话ID，请重新上传合同");
                 toast.dismiss("create-task-hint");
@@ -329,7 +358,7 @@ export default function ReviewPanel({
                     size="large"
                     form={form}
                     colon={false}
-                    initialValues={{stance: "甲方", contract_type: "0", intensity: "宽松"}}
+                    initialValues={{stance: "甲方", contract_type: "", intensity: "宽松"}}
                 >
                     <div>
                         <div className="mb-2 text-[1.13rem] ml-[5.5rem]">审查立场</div>
@@ -372,15 +401,14 @@ export default function ReviewPanel({
                                     rowGap: 10,
                                 }}
                             >
-                                <Radio value="0" className="!ml-[11.06rem]">
-                                    服务类合同
-                                </Radio>
-                                <Radio value="1" className="!ml-[11.06rem]">
-                                    货物类合同
-                                </Radio>
-                                <Radio value="2" className="!ml-[11.06rem]">
-                                    基建类合同
-                                </Radio>
+                                {(contractTypes.length > 0 ? contractTypes : [{ id: "fallback", contractTypeName: "通用", creator: "", updateDate: "" }]).map((item) => {
+                                    const name = item.contractTypeName || item.name || "通用";
+                                    return (
+                                        <Radio key={item.id} value={name} className="!ml-[11.06rem]">
+                                            {name}
+                                        </Radio>
+                                    );
+                                })}
                             </Radio.Group>
                         </Form.Item>
                     </div>

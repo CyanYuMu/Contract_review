@@ -64,31 +64,53 @@ type ContractDetailResponse struct {
 
 // CreateContractTypeRequest 创建合同类型请求
 type CreateContractTypeRequest struct {
-	Name string `json:"name"`
+	Name             string `json:"name"`
+	ContractTypeName string `json:"contractTypeName"`
+	TemplateContent  string `json:"templateContent"`
 }
 
 // UpdateContractTypeNameRequest 更新合同类型名称请求
 type UpdateContractTypeNameRequest struct {
-	Name string `json:"name"`
+	Name             string `json:"name"`
+	ContractTypeName string `json:"contractTypeName"`
+	TemplateContent  string `json:"templateContent"`
+}
+
+// ContractTypePageRequest 合同类型分页筛选参数
+type ContractTypePageRequest struct {
+	ContractTypeName string `json:"contractTypeName"`
+	Creator          string `json:"creator"`
+	StartDate        string `json:"startDate"`
+	EndDate          string `json:"endDate"`
+	Page             int    `json:"page"`
+	PageSize         int    `json:"pageSize"`
 }
 
 // ============ ContractType 响应结构 ============
 
 // ContractTypeResponse 合同类型响应
 type ContractTypeResponse struct {
-	ID        uint64 `json:"id"`
-	Name      string `json:"name"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	ID               uint64 `json:"id"`
+	Name             string `json:"name"`
+	ContractTypeName string `json:"contractTypeName"`
+	TemplateContent  string `json:"templateContent"`
+	Creator          string `json:"creator"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
+	UpdateDate       string `json:"updateDate"`
 }
 
 // ContractTypeDetailResponse 合同类型详情响应（包含使用数量）
 type ContractTypeDetailResponse struct {
-	ID            uint64 `json:"id"`
-	Name          string `json:"name"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
-	ContractCount int64  `json:"contract_count"` // 该类型下的合同数量
+	ID               uint64 `json:"id"`
+	Name             string `json:"name"`
+	ContractTypeName string `json:"contractTypeName"`
+	TemplateContent  string `json:"templateContent"`
+	Creator          string `json:"creator"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
+	UpdateDate       string `json:"updateDate"`
+	ContractCount    int64  `json:"contract_count"` // 该类型下的合同数量
 }
 
 // ContractTypeListResponse 合同类型列表响应
@@ -97,4 +119,10 @@ type ContractTypeListResponse struct {
 	Total    int64                  `json:"total"`
 	Page     int                    `json:"page"`
 	PageSize int                    `json:"page_size"`
+}
+
+// ContractTypeCreatorResponse 合同类型创建人响应
+type ContractTypeCreatorResponse struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }

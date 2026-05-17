@@ -46,6 +46,7 @@ func AccessJWTAuth() app.HandlerFunc {
 			})
 			return
 		}
+		c.Set("account", claims.Account)
 		c.Set("accountID", claims.Account)
 		c.Set("username", claims.Username)
 		c.Set("roles", claims.Roles)
@@ -61,7 +62,7 @@ func checkAccessToken(
 ) error {
 
 	uid := claims.Account
-	redisKey := fmt.Sprintf("access:%d", uid)
+	redisKey := fmt.Sprintf("access:%s", uid)
 
 	//Redis 优先
 	if global.Redis != nil {

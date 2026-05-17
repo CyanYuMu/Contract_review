@@ -6,6 +6,7 @@ type UploadData = {
     title?: string;
     file_type?: string;
     file_url?: string;
+    contract_type_id?: number;
     party_a?: string;
     party_b?: string;
     // 比对文档相关字段

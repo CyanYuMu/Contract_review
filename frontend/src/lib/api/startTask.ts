@@ -72,12 +72,14 @@ export const startTask = async (
                                 const dataContent = trimmedLine.slice(5).trim();
                                 if (dataContent) {
                                     processPromise = processPromise.then(() => {
-                                        return new Promise<void>((resolve) => {
+                                        return new Promise<void>((resolve, reject) => {
                                             requestAnimationFrame(() => {
-                                                processDataLine(dataContent, onRiskData);
-                                                setTimeout(() => {
-                                                    resolve();
-                                                }, 200);
+                                                const error = processDataLine(dataContent, onRiskData);
+                                                if (error) {
+                                                    reject(error);
+                                                    return;
+                                                }
+                                                setTimeout(resolve, 200);
                                             });
                                         });
                                     });
@@ -108,12 +110,14 @@ export const startTask = async (
                         const dataContent = trimmedLine.slice(5).trim();
                         if (dataContent) {
                             processPromise = processPromise.then(() => {
-                                return new Promise<void>((resolve) => {
+                                return new Promise<void>((resolve, reject) => {
                                     requestAnimationFrame(() => {
-                                        processDataLine(dataContent, onRiskData);
-                                        setTimeout(() => {
-                                            resolve();
-                                        }, 200);
+                                        const error = processDataLine(dataContent, onRiskData);
+                                        if (error) {
+                                            reject(error);
+                                            return;
+                                        }
+                                        setTimeout(resolve, 200);
                                     });
                                 });
                             });
@@ -124,6 +128,7 @@ export const startTask = async (
         } catch (error) {
             onStreamingEnd?.();
             onError?.(error as Error);
+            throw error;
         }
     }
 
@@ -133,13 +138,18 @@ export const startTask = async (
 function processDataLine(
     dataContent: string,
     onRiskData?: (risk: RiskResponse) => void
-) {
+): Error | undefined {
     if (!dataContent) {
         return;
     }
 
     try {
         const parsed = JSON.parse(dataContent);
+
+        if (parsed.event === "error") {
+            const message = parsed.data?.message || "审阅任务启动失败";
+            return new Error(message);
+        }
 
         if (parsed.event === "message" && parsed.data) {
             const riskDataObj = parsed.data;
@@ -163,7 +173,9 @@ function processDataLine(
                     original_content: riskDataObj.original_content || "",
                     risk_analysis: riskDataObj.risk_analysis || "",
                     risk_level: riskDataObj.risk_level || "",
+                    risk_type: riskDataObj.risk_type || "",
                     suggested_content: riskDataObj.suggested_content || "",
+                    reason: riskDataObj.reason || "",
                     is_accepted: isAccepted,
                     created_at: riskDataObj.created_at || "",
                 };
@@ -310,7 +322,9 @@ function processSSEData(
                         original_content: riskDataObj.original_content,
                         risk_analysis: riskDataObj.risk_analysis,
                         risk_level: riskDataObj.risk_level,
+                        risk_type: riskDataObj.risk_type,
                         suggested_content: riskDataObj.suggested_content,
+                        reason: riskDataObj.reason,
                         is_accepted: isAccepted,
                         created_at: riskDataObj.created_at,
                     };

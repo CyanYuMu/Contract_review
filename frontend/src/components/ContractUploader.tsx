@@ -105,12 +105,15 @@ export default function ContractUploader({
                 | string
                 | undefined;
             const file_url = (uploadRes?.data?.file_url ??
+                uploadRes?.data?.file_path_url ??
                 uploadRes?.file_url ??
+                uploadRes?.file_path_url ??
                 uploadRes?.data?.url ??
                 uploadRes?.url) as string | undefined;
             const partyA = uploadRes?.data?.party_a ?? uploadRes?.party_a;
             const partyB = uploadRes?.data?.party_b ?? uploadRes?.party_b;
-            setData({title, file_type, file_url, party_a: partyA, party_b: partyB});
+            const contractTypeId = uploadRes?.data?.contract_type_id ?? uploadRes?.contract_type_id;
+            setData({title, file_type, file_url, contract_type_id: contractTypeId, party_a: partyA, party_b: partyB});
             const fileId =
                 uploadRes?.data?.file_id ??
                 uploadRes?.file_id ??
@@ -124,9 +127,15 @@ export default function ContractUploader({
                     session_type: "review",
                     file_id: fileId,
                 });
-                const sid = sessionRes.id;
-                if (typeof sid === "number") {
-                    setTaskSessionId(String(sid));
+                const sid =
+                    sessionRes?.session_id ??
+                    sessionRes?.id ??
+                    sessionRes?.data?.session_id ??
+                    sessionRes?.data?.id;
+                const sessionId = Number(sid);
+                if (Number.isFinite(sessionId) && sessionId > 0) {
+                    setTaskSessionId(String(sessionId));
+                    localStorage.setItem("review_session_id", String(sessionId));
                 } else {
                     console.error("创建会话失败：未返回有效的 session_id");
                 }
@@ -144,6 +153,11 @@ export default function ContractUploader({
             }
             if (title) {
                 localStorage.setItem("uploaded_file_title", title);
+            }
+            if (contractTypeId) {
+                localStorage.setItem("uploaded_contract_type_id", String(contractTypeId));
+            } else {
+                localStorage.removeItem("uploaded_contract_type_id");
             }
             if (partyA !== undefined && partyA !== null) {
                 localStorage.setItem("uploaded_party_a", partyA);
@@ -185,6 +199,7 @@ export default function ContractUploader({
         localStorage.removeItem("uploaded_file_url");
         localStorage.removeItem("uploaded_file_type");
         localStorage.removeItem("uploaded_file_title");
+        localStorage.removeItem("uploaded_contract_type_id");
         localStorage.removeItem("uploaded_party_a");
         localStorage.removeItem("uploaded_party_b");
     };

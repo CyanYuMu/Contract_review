@@ -20,6 +20,7 @@ export default function RegisterModal({ visible, onCancel, onSuccess, onSwitchTo
         try {
             setLoading(true);
             await register({
+                account: values.username,
                 username: values.username,
                 password: values.password
             });

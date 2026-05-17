@@ -45,10 +45,10 @@ type ToolCallRequest struct {
 
 // ReactDecision LLM 单步决策结果
 type ReactDecision struct {
-	Thought   string           `json:"thought"`
-	Action    string           `json:"action"`    // "tool_call" 或 "finish"
-	ToolCall  *ToolCallRequest `json:"tool_call,omitempty"`
-	FinalAnswer interface{}    `json:"final_answer,omitempty"`
+	Thought     string           `json:"thought"`
+	Action      string           `json:"action"` // "tool_call" 或 "finish"
+	ToolCall    *ToolCallRequest `json:"tool_call,omitempty"`
+	FinalAnswer interface{}      `json:"final_answer,omitempty"`
 }
 
 // Run 执行 ReAct 循环
@@ -118,11 +118,11 @@ func (rl *ReactLoop) Run(
 				state.FinalResult = response.Content
 				state.Completed = true
 				state.Steps = append(state.Steps, ThinkStep{
-					Iteration: state.Iteration,
-					Thought:   "输出最终结果",
-					Action:    "finish",
+					Iteration:   state.Iteration,
+					Thought:     "输出最终结果",
+					Action:      "finish",
 					Observation: response.Content,
-					Timestamp: time.Now(),
+					Timestamp:   time.Now(),
 				})
 				return buildOutput(state), nil
 			}
@@ -209,11 +209,6 @@ func (rl *ReactLoop) Run(
 				Content: fmt.Sprintf("观察结果：%s", observation),
 			})
 
-			if shouldStopEarly(state) {
-				global.Log.Info("ReAct 循环提前终止：结果收敛")
-				state.Completed = true
-				return buildOutput(state), nil
-			}
 		}
 	}
 
@@ -266,7 +261,8 @@ func areSimilar(a, b string) bool {
 // parseReactDecision 解析 LLM 输出为 ReAct 决策
 func parseReactDecision(content string) (*ReactDecision, error) {
 	var decision ReactDecision
-	if err := json.Unmarshal([]byte(extractJSON(content)), &decision); err == nil {
+	if err := json.Unmarshal([]byte(extractJSON(content)), &decision); err == nil &&
+		(decision.Action != "" || decision.ToolCall != nil || decision.FinalAnswer != nil) {
 		return &decision, nil
 	}
 

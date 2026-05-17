@@ -4,6 +4,7 @@ import (
 	"context"
 	"contract_review/app/internal/agent"
 	"contract_review/app/internal/global"
+	"contract_review/app/internal/llm"
 	"contract_review/app/internal/middleware/redis"
 	"contract_review/app/internal/rag"
 	"contract_review/app/internal/tools"
@@ -15,7 +16,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cloudwego/eino-ext/components/model/arkbot"
+	fmodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
@@ -33,7 +34,7 @@ type ReviewService struct {
 	reviewResultRepo *ReviewResultRepo
 	db               *gorm.DB
 	cache            *redis.RedisClient
-	llm              *arkbot.ChatModel
+	llm              fmodel.BaseChatModel
 	orchestrator     *agent.ReviewOrchestrator
 	basePrompt       string
 	contractPrompts  map[string]string
@@ -57,16 +58,12 @@ func NewReviewService(
 
 // InitLLM 初始化LLM客户端
 func (s *ReviewService) InitLLM(ctx context.Context) error {
-	llm, err := arkbot.NewChatModel(ctx,
-		&arkbot.Config{
-			Model:  global.Config.LLMConfig.Model,
-			APIKey: global.Config.LLMConfig.APIKey,
-		})
+	chatModel, err := llm.NewChatModel(ctx)
 	if err != nil {
 		global.Log.Error("初始化LLM客户端失败", zap.Error(err))
 		return err
 	}
-	s.llm = llm
+	s.llm = chatModel
 
 	// 加载提示词模板
 	if err := s.loadPromptTemplates(); err != nil {
@@ -111,15 +108,25 @@ func (s *ReviewService) loadPromptTemplates() error {
 // ============ Task CRUD Operations ============
 
 // CreateReviewTask 创建审阅任务
-func (s *ReviewService) CreateReviewTask(ctx context.Context, userID uint64, req *CreateReviewTaskRequest) (*ReviewTask, error) {
+func (s *ReviewService) CreateReviewTask(ctx context.Context, account string, req *CreateReviewTaskRequest) (*ReviewTask, error) {
 	// 验证会话存在并获取 FileID
 	var sessRecord struct {
 		ID     uint64 `gorm:"column:id"`
 		FileID uint64 `gorm:"column:file_id"`
+		UserID uint64 `gorm:"column:user_id"`
 	}
 	if err := s.db.WithContext(ctx).Table("sessions").
 		Where("id = ?", req.SessionID).First(&sessRecord).Error; err != nil {
 		return nil, fmt.Errorf("获取会话信息失败: %w", err)
+	}
+	var userRecord struct {
+		ID uint64 `gorm:"column:id"`
+	}
+	if err := s.db.WithContext(ctx).Table("users").Select("id").Where("account = ?", account).First(&userRecord).Error; err != nil {
+		return nil, fmt.Errorf("获取用户信息失败: %w", err)
+	}
+	if sessRecord.UserID != userRecord.ID {
+		return nil, fmt.Errorf("无权访问该会话")
 	}
 
 	// 检查是否已存在任务，存在则删除旧任务
@@ -141,7 +148,7 @@ func (s *ReviewService) CreateReviewTask(ctx context.Context, userID uint64, req
 	task := &ReviewTask{
 		SessionID:    req.SessionID,
 		FileID:       sessRecord.FileID,
-		UserID:       userID,
+		UserID:       userRecord.ID,
 		Stance:       req.Stance,
 		Intensity:    req.Intensity,
 		ContractType: req.ContractType,
@@ -610,8 +617,8 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 
 	keywordIndex := rag.NewSimpleKeywordIndex()
 	retrieverConfig := rag.DefaultRetrieverConfig()
-	// 仅关键词通道时，默认 MinRelevance=0.5 易过滤部分命中，略调低以便召回
-	retrieverConfig.MinRelevance = 0.12
+	// RRF 融合后的分数天然较小，仅关键词通道不再用固定阈值过滤，避免中文命中被误删。
+	retrieverConfig.MinRelevance = 0
 
 	if global.DB != nil {
 		chunks, loadErr := rag.LoadKnowledgeChunksFromDB(ctx, global.DB)
@@ -628,6 +635,13 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 		}
 	} else {
 		global.Log.Warn("global.DB 未初始化，跳过审阅知识库加载")
+	}
+	if len(keywordIndex.SearchableChunks()) == 0 {
+		if err := keywordIndex.Index(defaultReviewKnowledgeChunks()); err != nil {
+			global.Log.Warn("内置审阅知识入索引失败", zap.Error(err))
+		} else {
+			global.Log.Warn("使用内置审阅知识兜底；建议执行 docs/sql/review_knowledge.sql 写入数据库知识库")
+		}
 	}
 
 	// 向量检索需配置 VectorStore + EmbeddingModel（如 Milvus）；当前为 nil 时仅走关键词索引
@@ -647,6 +661,38 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 	return nil
 }
 
+func defaultReviewKnowledgeChunks() []rag.Chunk {
+	items := []struct {
+		id       string
+		category string
+		subCat   string
+		source   string
+		content  string
+	}{
+		{"builtin-1", "规范", "通用", "内置审阅指引", "合同应明确服务范围、交付成果、验收标准、付款节点、违约责任、解除条件、知识产权归属、保密义务、争议解决和管辖。缺少上述核心条款或表述不清，通常构成履约争议风险。"},
+		{"builtin-2", "规范", "服务类合同", "内置服务合同审阅指引", "服务类合同应明确服务内容、服务期限、质量标准、验收流程、整改期限、费用支付条件、成果知识产权归属和逾期违约责任。仅列附件或笼统描述服务内容，容易导致验收和付款争议。"},
+		{"builtin-3", "法规", "通用", "《中华人民共和国民法典》合同编通用规则", "当事人应当按照约定全面履行自己的义务。一方不履行合同义务或者履行不符合约定的，应承担继续履行、采取补救措施或者赔偿损失等违约责任。"},
+		{"builtin-4", "规范", "通用", "内置违约责任审阅指引", "违约责任应与主要义务对应，至少覆盖逾期付款、逾期交付、质量不合格、擅自解除、保密违约和知识产权侵权等场景。仅约定一方责任或责任过轻，可能对审查立场不利。"},
+		{"builtin-5", "规范", "通用", "内置争议解决审阅指引", "争议解决条款应明确适用法律、管辖法院或仲裁机构。管辖地、仲裁机构名称不明或同时约定诉讼与仲裁，可能导致争议解决成本和效力风险。"},
+	}
+	chunks := make([]rag.Chunk, 0, len(items))
+	for i, item := range items {
+		chunks = append(chunks, rag.Chunk{
+			ID:      item.id,
+			DocID:   "builtin",
+			Content: item.content,
+			Metadata: map[string]string{
+				"title":        item.source,
+				"category":     item.category,
+				"sub_category": item.subCat,
+				"source":       item.source,
+				"chunk_index":  fmt.Sprintf("%d", i),
+			},
+		})
+	}
+	return chunks
+}
+
 // AgentReviewContract 使用 Agent 架构审阅合同
 // 替代原有的 ProcessContractReview 暴力分块 + 并发 LLM 调用
 func (s *ReviewService) AgentReviewContract(
@@ -655,10 +701,9 @@ func (s *ReviewService) AgentReviewContract(
 	contractContent string,
 	resultChan chan<- ChunkResult,
 ) error {
-	if s.orchestrator == nil {
-		if err := s.InitOrchestrator(ctx); err != nil {
-			return fmt.Errorf("初始化 Agent 编排器失败: %w", err)
-		}
+	// 每次审阅前重新加载知识库，确保刚在 setting/risk 配置的风险点能立即进入 RAG。
+	if err := s.InitOrchestrator(ctx); err != nil {
+		return fmt.Errorf("初始化 Agent 编排器失败: %w", err)
 	}
 
 	meta := agent.ContractMeta{

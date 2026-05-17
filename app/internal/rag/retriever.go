@@ -3,8 +3,10 @@ package rag
 import (
 	"log"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // RAGRetriever 混合检索器
@@ -182,9 +184,13 @@ func (ski *SimpleKeywordIndex) Index(chunks []Chunk) error {
 	return nil
 }
 
+func (ski *SimpleKeywordIndex) SearchableChunks() []Chunk {
+	return ski.chunks
+}
+
 // Search 基于 TF 的简单关键词检索
 func (ski *SimpleKeywordIndex) Search(query string, topK int, filters map[string]string) ([]SearchResult, error) {
-	queryTerms := strings.Fields(strings.ToLower(query))
+	queryTerms := tokenizeQuery(query)
 	if len(queryTerms) == 0 {
 		return nil, nil
 	}
@@ -232,6 +238,56 @@ func (ski *SimpleKeywordIndex) Search(query string, topK int, filters map[string
 	}
 
 	return results, nil
+}
+
+func tokenizeQuery(query string) []string {
+	normalized := strings.ToLower(strings.TrimSpace(query))
+	if normalized == "" {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	var terms []string
+	add := func(term string) {
+		term = strings.TrimSpace(term)
+		if utf8.RuneCountInString(term) < 2 || seen[term] {
+			return
+		}
+		seen[term] = true
+		terms = append(terms, term)
+	}
+
+	for _, term := range strings.Fields(normalized) {
+		add(term)
+	}
+
+	for _, term := range regexp.MustCompile(`[[:punct:]\s，。；：、（）《》【】“”"']+`).Split(normalized, -1) {
+		add(term)
+	}
+
+	legalKeywords := []string{
+		"付款", "支付", "验收", "交付", "违约", "赔偿", "违约金", "解除", "终止",
+		"知识产权", "著作权", "保密", "管辖", "争议", "发票", "逾期", "单方",
+		"服务范围", "服务内容", "质量", "期限", "义务", "责任", "免责",
+	}
+	for _, kw := range legalKeywords {
+		if strings.Contains(normalized, kw) {
+			add(kw)
+		}
+	}
+
+	runes := []rune(normalized)
+	for i := 0; i < len(runes)-1; i++ {
+		if isCJK(runes[i]) && isCJK(runes[i+1]) {
+			add(string(runes[i : i+2]))
+		}
+	}
+
+	return terms
+}
+
+func isCJK(r rune) bool {
+	return (r >= '\u4e00' && r <= '\u9fff') || (r >= '\u3400' && r <= '\u4dbf')
 }
 
 func matchFilters(metadata map[string]string, filters map[string]string) bool {

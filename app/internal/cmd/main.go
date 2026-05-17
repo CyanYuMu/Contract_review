@@ -13,8 +13,10 @@ import (
 	"contract_review/app/internal/knowledge"
 	"contract_review/app/internal/middleware/jwt_auth"
 	"contract_review/app/internal/middleware/redis"
+	"contract_review/app/internal/modelconfig"
 	"contract_review/app/internal/prompts"
 	"contract_review/app/internal/review"
+	"contract_review/app/internal/riskconfig"
 	"contract_review/app/internal/session"
 	"contract_review/app/internal/user"
 
@@ -59,10 +61,12 @@ func main() {
 		&contract.ContractType{},
 		&review.ReviewTask{},
 		&review.ReviewResult{},
+		&riskconfig.RiskPoint{},
 		&comparison.ComparisonTask{},
 		&prompts.SystemPrompt{},
 		&prompts.InstitutionPrompt{},
 		&prompts.PersonalPrompt{},
+		&modelconfig.ModelConfig{},
 	); err != nil {
 		global.Log.Fatal("AutoMigrate失败", zap.Error(err))
 	}
@@ -76,6 +80,11 @@ func main() {
 
 	// 6. 初始化 LLM
 	ctx := context.Background()
+	modelConfigRepo := modelconfig.NewRepo(db)
+	modelConfigService := modelconfig.NewService(modelConfigRepo)
+	if err := modelConfigService.EnsureDefaultFromConfig(ctx, global.Config.LLMConfig); err != nil {
+		global.Log.Fatal("初始化模型配置失败", zap.Error(err))
+	}
 	llm, err := Initialize.InitLLM(ctx)
 	if err != nil {
 		global.Log.Fatal("初始化LLM失败", zap.Error(err))
@@ -93,6 +102,7 @@ func main() {
 	contractRepo := contract.NewContractRepo(db)
 	reviewRepo := review.NewReviewRepo(db)
 	reviewResultRepo := review.NewReviewResultRepo(db)
+	riskPointRepo := riskconfig.NewRepo(db)
 	comparisonRepo := comparison.NewComparisonRepo(db)
 	_ = prompts.NewPromptRepo(db)
 
@@ -101,6 +111,7 @@ func main() {
 	contractService := contract.NewContractService(contractRepo, global.Redis)
 	sessionService := session.NewSessionService(sessionRepo, contractRepo, db, global.Redis)
 	reviewService := review.NewReviewService(reviewRepo, reviewResultRepo, db, global.Redis)
+	riskPointService := riskconfig.NewService(riskPointRepo, db)
 	comparisonService := comparison.NewComparisonService(comparisonRepo, contractRepo, db, global.Redis)
 
 	// 创建 handlers
@@ -108,14 +119,16 @@ func main() {
 	sessionHandler := session.NewSessionHandler(sessionService)
 	contractHandler := contract.NewContractHandler(contractService)
 	reviewHandler := review.NewReviewHandler(reviewService, contractService)
+	riskPointHandler := riskconfig.NewHandler(riskPointService)
 	comparisonHandler := comparison.NewComparisonHandler(comparisonService)
+	modelConfigHandler := modelconfig.NewHandler(modelConfigService)
 
 	// 9. 创建 Hertz 服务器并注册路由
 	addr := fmt.Sprintf("%s:%d", global.Config.Server.Host, global.Config.Server.Port)
 	h := server.Default(server.WithHostPorts(addr))
 
 	// 静态文件
-	h.Static("/api/static", "./uploads")
+	h.Static("/api/static", contract.UploadDir())
 
 	api := h.Group("/api")
 	authMW := jwt_auth.AccessJWTAuth()
@@ -157,8 +170,20 @@ func main() {
 	api.GET("/contract_type/detail/:id", authMW, contractHandler.GetContractType)
 	api.GET("/contract_type/list", authMW, contractHandler.ListContractTypes)
 	api.GET("/contract_type/page", authMW, contractHandler.ListContractTypes)
+	api.GET("/contract_type/creators", authMW, contractHandler.ListContractTypeCreators)
 	api.PUT("/contract_type/update/:id", authMW, contractHandler.UpdateContractTypeName)
 	api.DELETE("/contract_type/delete/:id", authMW, contractHandler.DeleteContractType)
+	api.DELETE("/contract_type/batchdelete", authMW, contractHandler.BatchDeleteContractType)
+
+	// ============ Risk Point 路由 ============
+	api.POST("/risk_point/create", authMW, riskPointHandler.Create)
+	api.GET("/risk_point/detail/:id", authMW, riskPointHandler.Detail)
+	api.GET("/risk_point/list", authMW, riskPointHandler.List)
+	api.GET("/risk_point/page", authMW, riskPointHandler.List)
+	api.GET("/risk_point/stats", authMW, riskPointHandler.Stats)
+	api.PUT("/risk_point/update/:id", authMW, riskPointHandler.Update)
+	api.DELETE("/risk_point/delete/:id", authMW, riskPointHandler.Delete)
+	api.DELETE("/risk_point/batchdelete", authMW, riskPointHandler.BatchDelete)
 
 	// ============ Review 路由 ============
 	api.POST("/review_task/start_task", authMW, reviewHandler.StartReviewTask)
@@ -180,9 +205,6 @@ func main() {
 	api.DELETE("/comparison/task/:id", authMW, comparisonHandler.DeleteComparisonTask)
 
 	// ============ Stub 路由（前端需要但后端未实现） ============
-	stubOK := func(ctx context.Context, c *app.RequestContext) {
-		c.JSON(http.StatusOK, map[string]interface{}{"code": 200, "msg": "Success"})
-	}
 	stubJSON := func(data interface{}) app.HandlerFunc {
 		return func(ctx context.Context, c *app.RequestContext) {
 			c.JSON(http.StatusOK, map[string]interface{}{"code": 200, "msg": "Success", "data": data})
@@ -196,12 +218,11 @@ func main() {
 	api.GET("/signboard/departments_usage", stubJSON([]interface{}{}))
 	api.GET("/signboard/trends_contracts", stubJSON([]interface{}{}))
 
-	api.GET("/model_configs/get_all_models/", stubJSON([]interface{}{}))
-	api.GET("/model_configs/get_default_model", stubJSON(map[string]interface{}{
-		"model_name": global.Config.LLMConfig.Model,
-	}))
-	api.POST("/model_configs/create_model", stubOK)
-	api.PUT("/model_configs/update_model/:id", stubOK)
+	api.GET("/model_configs/get_all_models/", authMW, modelConfigHandler.List)
+	api.GET("/model_configs/get_default_model", authMW, modelConfigHandler.GetDefault)
+	api.GET("/model_configs/provider_options", authMW, modelConfigHandler.ProviderOptions)
+	api.POST("/model_configs/create_model", authMW, modelConfigHandler.Create)
+	api.PUT("/model_configs/update_model/:id", authMW, modelConfigHandler.Update)
 
 	api.GET("/prompt_manage/org/", stubJSON(map[string]interface{}{
 		"prompt_text": "",

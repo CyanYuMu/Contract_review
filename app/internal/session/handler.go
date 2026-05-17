@@ -39,7 +39,6 @@ func (h *SessionHandler) CreateSession(ctx context.Context, c *app.RequestContex
 		c.JSON(401, response.Unauthorized())
 		return
 	}
-	userID, _ := strconv.ParseUint(userIDStr, 10, 64)
 
 	// 2. 绑定请求参数
 	var req CreateSessionRequest
@@ -50,7 +49,7 @@ func (h *SessionHandler) CreateSession(ctx context.Context, c *app.RequestContex
 	}
 
 	// 3. 创建会话
-	session, err := h.sessionService.CreateSession(ctx, userID, &req)
+	session, err := h.sessionService.CreateSession(ctx, userIDStr, &req)
 	if err != nil {
 		global.Log.Error("创建会话失败", zap.Error(err))
 		c.JSON(500, response.FailWithMsg(err.Error()))

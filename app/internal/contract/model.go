@@ -28,10 +28,12 @@ func (Contract) TableName() string {
 
 // ContractType 合同类型表
 type ContractType struct {
-	ID        uint64    `gorm:"primaryKey;comment:类型ID"`
-	Name      string    `gorm:"size:64;not null;unique;comment:类型名称"`
-	CreatedAt time.Time `gorm:"autoCreateTime;comment:创建时间"`
-	UpdatedAt time.Time `gorm:"autoUpdateTime;comment:更新时间"`
+	ID              uint64    `gorm:"primaryKey;comment:类型ID" json:"id"`
+	Name            string    `gorm:"size:64;not null;unique;comment:类型名称" json:"name"`
+	TemplateContent string    `gorm:"type:text;comment:该合同类型的审阅提示词模板" json:"template_content"`
+	Creator         string    `gorm:"size:64;index;comment:创建者账号" json:"creator"`
+	CreatedAt       time.Time `gorm:"autoCreateTime;comment:创建时间" json:"created_at"`
+	UpdatedAt       time.Time `gorm:"autoUpdateTime;comment:更新时间" json:"updated_at"`
 
 	// 关联的合同列表
 	Contracts []Contract `gorm:"foreignKey:TypeID"`

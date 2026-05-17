@@ -120,15 +120,15 @@ export default function ContrastHistory({
                         const standardFile = item.standard_file ?? {};
                         const comparisonFile = item.comparison_file ?? {};
                         return {
-                            id: item.id ?? idx + 1,
-                            origin_contract_name: item.file_name ?? standardFile.title ?? "",
+                            id: item.session_id ?? item.id ?? idx + 1,
+                            origin_contract_name: item.file_name_1 ?? item.file_name ?? standardFile.title ?? "",
                             new_contract_name: item.file_name_2 ?? comparisonFile.title ?? "",
                             similarity: item.similarity ?? 0,
-                            status: Boolean(item.is_accepted),
+                            status: item.status === "completed" || Number(item.similarity ?? 0) > 0,
                             dateRange: item.created_at ?? "",
-                            file_path: item.file_path ?? standardFile.file_path ?? item.original_file_path ?? "",
+                            file_path: item.file_path_1 ?? item.file_path ?? standardFile.file_path ?? item.original_file_path ?? "",
                             file_path_2: item.file_path_2 ?? comparisonFile.file_path ?? item.comparison_file_path ?? "",
-                            file_id: item.file_id ?? standardFile.file_id ?? item.original_file_id,
+                            file_id: item.file_id_1 ?? item.file_id ?? standardFile.file_id ?? item.original_file_id,
                             file_id_2: item.file_id_2 ?? comparisonFile.file_id ?? item.comparison_file_id,
                             standard_download_url: item.download_url ?? standardFile.download_url ?? item.standard_download_url,
                             comparison_download_url: item.download_url_2 ?? comparisonFile.download_url ?? item.comparison_download_url,

@@ -186,6 +186,15 @@ func (us *UserService) GetUserInfo(ctx context.Context, userID uint) (*User, err
 	return user, nil
 }
 
+func (us *UserService) GetUserInfoByAccount(ctx context.Context, account string) (*User, error) {
+	user, err := us.userrepo.GetUserByAccount(ctx, account)
+	if err != nil {
+		global.Log.Error("GetUserByAccount error", zap.Error(err))
+		return nil, err
+	}
+	return user, nil
+}
+
 // ChangePassword 修改密码
 func (us *UserService) ChangePassword(ctx context.Context, userID uint, oldPassword string, newPassword string) error {
 	user, err := us.userrepo.GetUserByID(ctx, userID)

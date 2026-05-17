@@ -1,29 +1,36 @@
-
 'use client';
 
 import '@ant-design/v5-patch-for-react-19';
-import React, { Suspense, useEffect, useState } from 'react';
-import { Button, Input, Select, DatePicker, Table, Space, message, Modal } from 'antd';
+import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { Button, DatePicker, Input, Modal, Select, Space, Table, Tag, message } from 'antd';
 import type { TableColumnsType } from 'antd';
 import dayjs from 'dayjs';
 import Image from "next/image";
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { assets } from "@/assets/assets";
-import { useSearchParams } from 'next/navigation';
 import { useRiskEditStore } from '@/store/riskEditStore';
 import { CustomPagination } from '@/components/table/CustomPagination';
+import { ContractTypeListItem, getContractTypeList } from '@/lib/api/contractType';
+import {
+    RiskPointListItem,
+    RiskPointStats,
+    batchDeleteRiskPoint,
+    deleteRiskPoint,
+    getRiskPointPage,
+    getRiskPointStats,
+} from '@/lib/api/risk';
 
 const { RangePicker } = DatePicker;
 
-interface RiskPoint {
-    key: string;
-    riskId: string;
-    riskContent: string;
-    applicableContractType: string;
-    creator: string;
-    updateDate: string;
-    status: string;
-}
+const emptyStats: RiskPointStats = {
+    total: 0,
+    enabled: 0,
+    disabled: 0,
+    indexed: 0,
+    byLevel: [],
+    byType: [],
+    byContractType: [],
+};
 
 function RiskPageContent() {
     const [riskId, setRiskId] = useState<string>('');
@@ -32,7 +39,9 @@ function RiskPageContent() {
     const [contractType, setContractType] = useState<string>('');
     const [creator, setCreator] = useState<string>('');
     const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
-    const [dataSource, setDataSource] = useState<RiskPoint[]>([]);
+    const [dataSource, setDataSource] = useState<RiskPointListItem[]>([]);
+    const [contractTypes, setContractTypes] = useState<ContractTypeListItem[]>([]);
+    const [stats, setStats] = useState<RiskPointStats>(emptyStats);
     const [loading, setLoading] = useState<boolean>(false);
     const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
     const [pagination, setPagination] = useState({
@@ -44,89 +53,102 @@ function RiskPageContent() {
     const searchParams = useSearchParams();
     const setRiskData = useRiskEditStore((state) => state.setRiskData);
 
-    // 模拟数据
-    const mockData: RiskPoint[] = [
-        {
-            key: '1',
-            riskId: '2025121B001',
-            riskContent: '这是风险点内容这是风险点内容这是风险点内容这是风险点内容这是风险点内容这是风险点内容这是风险点内容这是风险点内容这是风险点内容这是风险点内容',
-            applicableContractType: '货物类合同',
-            creator: '平台',
-            updateDate: '2025/12/01 00:00:02',
-            status: '启用'
-        },
-        {
-            key: '2',
-            riskId: '2025121B002',
-            riskContent: '这是风险点内容这是风险点内容这是风险点内容这是风险点内容这是风险点内容这是风险点内容这是风险点内容这是风险点内容这是风险点内容这是风险点内容',
-            applicableContractType: '货物类合同',
-            creator: '平台',
-            updateDate: '2025/12/01 00:00:02',
-            status: '停用'
-        }
-    ];
-
     useEffect(() => {
-        // 从URL参数中获取合同类型
         const contractTypeParam = searchParams.get('contractType');
         if (contractTypeParam) {
             setContractType(contractTypeParam);
         }
     }, [searchParams]);
 
-    useEffect(() => {
-        fetchRiskList();
-    }, [pagination.current, pagination.pageSize, contractType]);
-
-    // 监听 URL 参数变化，当有 refresh 参数时刷新数据
-    useEffect(() => {
-        const refresh = searchParams.get('refresh');
-        if (refresh) {
-            setPagination({ current: 1, pageSize: 10, total: 0 });
-            fetchRiskList();
+    const fetchContractTypes = useCallback(async () => {
+        try {
+            const response = await getContractTypeList();
+            if (response?.code === 200 && response?.data?.list) {
+                setContractTypes(response.data.list);
+            }
+        } catch (error) {
+            console.error('获取合同类型失败:', error);
         }
-    }, [searchParams]);
+    }, []);
 
-    // 获取风险点列表
-    const fetchRiskList = async () => {
+    const fetchStats = useCallback(async (type = contractType) => {
+        try {
+            const response = await getRiskPointStats(type || undefined);
+            if (response?.code === 200 && response?.data) {
+                setStats(response.data);
+            } else {
+                setStats(emptyStats);
+            }
+        } catch {
+            setStats(emptyStats);
+        }
+    }, [contractType]);
+
+    const fetchRiskList = useCallback(async (
+        page: number,
+        pageSize: number,
+        type = contractType,
+    ) => {
         setLoading(true);
         try {
-            // TODO: 调用获取风险点列表接口
-            // const response = await getRiskList({
-            //     riskId,
-            //     riskContent,
-            //     status,
-            //     creator,
-            //     startDate: dateRange?.[0].format('YYYY-MM-DD'),
-            //     endDate: dateRange?.[1].format('YYYY-MM-DD'),
-            //     page: pagination.current,
-            //     pageSize: pagination.pageSize
-            // });
-
-            // 模拟数据
-            setDataSource(mockData);
-            setPagination({
-                ...pagination,
-                total: mockData.length
+            const response = await getRiskPointPage({
+                riskId: riskId || undefined,
+                riskContent: riskContent || undefined,
+                status: status || undefined,
+                contractType: type || undefined,
+                creator: creator || undefined,
+                startDate: dateRange?.[0]?.format('YYYY-MM-DD'),
+                endDate: dateRange?.[1]?.format('YYYY-MM-DD'),
+                page,
+                pageSize,
             });
-        } catch (error) {
+
+            if (response?.code === 200 && response?.data) {
+                setDataSource(response.data.list || []);
+                setPagination({
+                    current: response.data.page || page,
+                    pageSize: response.data.pageSize || response.data.page_size || pageSize,
+                    total: response.data.total || 0,
+                });
+            } else {
+                setDataSource([]);
+                setPagination((prev) => ({ ...prev, total: 0 }));
+            }
+        } catch {
             message.error('获取数据失败');
+            setDataSource([]);
         } finally {
             setLoading(false);
         }
-    };
+    }, [contractType, creator, dateRange, riskContent, riskId, status]);
+
+    useEffect(() => {
+        fetchContractTypes();
+    }, [fetchContractTypes]);
+
+    useEffect(() => {
+        fetchRiskList(1, pagination.pageSize, contractType);
+        fetchStats(contractType);
+    }, [contractType, fetchRiskList, fetchStats, pagination.pageSize]);
+
+    useEffect(() => {
+        const refresh = searchParams.get('refresh');
+        if (refresh) {
+            fetchRiskList(1, pagination.pageSize, contractType);
+            fetchStats(contractType);
+        }
+    }, [searchParams, fetchRiskList, fetchStats, pagination.pageSize, contractType]);
 
     const handleAdd = () => {
-        router.push('/setting/risk/editAndAdd?mode=add');
+        const query = contractType ? `?mode=add&contractType=${encodeURIComponent(contractType)}` : '?mode=add';
+        router.push(`/setting/risk/editAndAdd${query}`);
     };
 
-    // 查询
     const handleSearch = () => {
-        setPagination({ ...pagination, current: 1 });
-        fetchRiskList();
+        fetchRiskList(1, pagination.pageSize, contractType);
+        fetchStats(contractType);
     };
 
-    // 重置
     const handleReset = () => {
         setRiskId('');
         setRiskContent('');
@@ -134,48 +156,52 @@ function RiskPageContent() {
         setContractType('');
         setCreator('');
         setDateRange(null);
-        setPagination({ ...pagination, current: 1 });
-        fetchRiskList();
+        setTimeout(() => {
+            fetchRiskList(1, pagination.pageSize, '');
+            fetchStats('');
+        }, 0);
     };
 
-    // 编辑
-    const handleEdit = (record: RiskPoint) => {
+    const handleEdit = (record: RiskPointListItem) => {
         setRiskData({
-            id: record.key,
+            id: String(record.id),
             riskId: record.riskId,
-            contractType: record.applicableContractType,
-            applicableScope: 'department',
+            contractTypeId: record.contractTypeId,
+            contractType: record.contractType,
+            applicableScope: record.applicableScope,
+            department: record.department,
             riskContent: record.riskContent,
-            isEnabled: record.status === '启用' ? 'enabled' : 'disabled'
+            riskType: record.riskType,
+            riskLevel: record.riskLevel,
+            isEnabled: record.isEnabled
         });
-        router.push(`/setting/risk/editAndAdd?mode=edit&id=${record.riskId}`);
+        router.push(`/setting/risk/editAndAdd?mode=edit&id=${record.id}`);
     };
 
-    // 删除
-    const handleDelete = (record: RiskPoint) => {
+    const handleDelete = (record: RiskPointListItem) => {
         Modal.confirm({
             title: '删除风险点',
-            content: '确认要删除此条数据吗？',
+            content: '确认要删除此条数据吗？删除后对应 RAG 知识也会同步移除。',
             okText: '确认',
             cancelText: '取消',
             okButtonProps: { danger: true },
             onOk: async () => {
                 try {
-                    // TODO: 调用删除接口
-                    // await deleteRisk(record.riskId);
-                    message.success(`删除成功: ${record.riskId}`);
-                    await fetchRiskList();
-                } catch (error) {
+                    const response = await deleteRiskPoint(record.id);
+                    if (response?.code === 200) {
+                        message.success(`删除成功: ${record.riskId}`);
+                        await fetchRiskList(pagination.current, pagination.pageSize, contractType);
+                        await fetchStats(contractType);
+                    } else {
+                        message.error(response?.msg || '删除失败');
+                    }
+                } catch {
                     message.error('删除失败');
                 }
-            },
-            onCancel() {
-                // 取消操作
             },
         });
     };
 
-    // 批量删除
     const handleBatchDelete = () => {
         if (selectedRowKeys.length === 0) {
             message.warning('请选择要删除的项');
@@ -189,33 +215,42 @@ function RiskPageContent() {
             okButtonProps: { danger: true },
             onOk: async () => {
                 try {
-                    // TODO: 调用批量删除接口
-                    // await batchDeleteRisks(selectedRowKeys);
-                    message.success(`批量删除成功: ${selectedRowKeys.length} 项`);
-                    setSelectedRowKeys([]);
-                    await fetchRiskList();
-                } catch (error) {
+                    const ids = selectedRowKeys.map((key) => Number(key));
+                    const response = await batchDeleteRiskPoint(ids);
+                    if (response?.code === 200) {
+                        message.success(`批量删除成功: ${selectedRowKeys.length} 项`);
+                        setSelectedRowKeys([]);
+                        await fetchRiskList(pagination.current, pagination.pageSize, contractType);
+                        await fetchStats(contractType);
+                    } else {
+                        message.error(response?.msg || '删除失败');
+                    }
+                } catch {
                     message.error('删除失败');
                 }
-            },
-            onCancel() {
-                // 取消操作
             },
         });
     };
 
-    // 分页改变
     const handlePageChange = (page: number, pageSize: number) => {
-        setPagination({ ...pagination, current: page, pageSize });
-        fetchRiskList();
+        fetchRiskList(page, pageSize, contractType);
     };
 
-    const columns: TableColumnsType<RiskPoint> = [
+    const levelStats = useMemo(() => {
+        const map = new Map(stats.byLevel.map((item) => [item.name, item.value]));
+        return [
+            { label: '高', color: '#ff4d4f', value: map.get('高') || 0 },
+            { label: '中', color: '#faad14', value: map.get('中') || 0 },
+            { label: '低', color: '#52c41a', value: map.get('低') || 0 },
+        ];
+    }, [stats.byLevel]);
+
+    const columns: TableColumnsType<RiskPointListItem> = [
         {
             title: '风险点ID',
             dataIndex: 'riskId',
             key: 'riskId',
-            width: 150
+            width: 130
         },
         {
             title: '风险点内容',
@@ -228,6 +263,24 @@ function RiskPageContent() {
             dataIndex: 'applicableContractType',
             key: 'applicableContractType',
             width: 150
+        },
+        {
+            title: '风险等级',
+            dataIndex: 'riskLevel',
+            key: 'riskLevel',
+            width: 100,
+            render: (value: string) => (
+                <Tag color={value === '高' ? 'red' : value === '中' ? 'gold' : 'green'}>{value}</Tag>
+            )
+        },
+        {
+            title: 'RAG状态',
+            dataIndex: 'ragStatus',
+            key: 'ragStatus',
+            width: 100,
+            render: (value: string) => (
+                <Tag color={value === '已入库' ? 'blue' : value === '已停用' ? 'default' : 'orange'}>{value}</Tag>
+            )
         },
         {
             title: '创建者',
@@ -245,7 +298,7 @@ function RiskPageContent() {
             title: '状态',
             dataIndex: 'status',
             key: 'status',
-            width: 100
+            width: 90
         },
         {
             title: '操作',
@@ -273,7 +326,6 @@ function RiskPageContent() {
 
     return (
         <div className="flex flex-col bg-[#f1f1f1] h-[100%]">
-            {/* 搜索区域 */}
             <div className="mb-4 bg-white p-[1rem] rounded">
                 <div className="grid grid-cols-4 gap-x-4 gap-y-4 mb-4">
                     <div className="flex items-center">
@@ -303,8 +355,8 @@ function RiskPageContent() {
                             className="flex-1"
                             allowClear
                         >
-                            <Select.Option value="启用">启用</Select.Option>
-                            <Select.Option value="停用">停用</Select.Option>
+                            <Select.Option value="enabled">启用</Select.Option>
+                            <Select.Option value="disabled">停用</Select.Option>
                         </Select>
                     </div>
                 </div>
@@ -318,22 +370,21 @@ function RiskPageContent() {
                             className="flex-1"
                             allowClear
                         >
-                            <Select.Option value="货物类合同">货物类合同</Select.Option>
-                            <Select.Option value="服务类合同">服务类合同</Select.Option>
+                            {contractTypes.map((item) => (
+                                <Select.Option key={item.id} value={item.contractTypeName || item.name}>
+                                    {item.contractTypeName || item.name}
+                                </Select.Option>
+                            ))}
                         </Select>
                     </div>
                     <div className="flex items-center">
                         <span className="text-gray-700 w-[6rem] text-left mr-2">创建者：</span>
-                        <Select
-                            placeholder="请选择"
-                            value={creator || undefined}
-                            onChange={setCreator}
+                        <Input
+                            placeholder="请输入创建者"
+                            value={creator}
+                            onChange={(e) => setCreator(e.target.value)}
                             className="flex-1"
-                            allowClear
-                        >
-                            <Select.Option value="平台">平台</Select.Option>
-                            <Select.Option value="张三">张三</Select.Option>
-                        </Select>
+                        />
                     </div>
                     <div className="flex items-center">
                         <span className="text-gray-700 w-[6rem] text-left mr-2">更改日期：</span>
@@ -354,7 +405,41 @@ function RiskPageContent() {
                 </div>
             </div>
 
-            {/* 表格区域 */}
+            <div className="grid grid-cols-4 gap-4 mb-4">
+                <div className="bg-white rounded p-4">
+                    <div className="text-sm text-gray-500">风险点总数</div>
+                    <div className="text-2xl font-semibold text-[#1f1f1f]">{stats.total}</div>
+                </div>
+                <div className="bg-white rounded p-4">
+                    <div className="text-sm text-gray-500">已启用</div>
+                    <div className="text-2xl font-semibold text-[#2260F2]">{stats.enabled}</div>
+                </div>
+                <div className="bg-white rounded p-4">
+                    <div className="text-sm text-gray-500">已入库</div>
+                    <div className="text-2xl font-semibold text-[#13a872]">{stats.indexed}</div>
+                </div>
+                <div className="bg-white rounded p-4">
+                    <div className="text-sm text-gray-500 mb-2">等级分布</div>
+                    <div className="flex h-3 overflow-hidden rounded bg-[#f0f0f0]">
+                        {levelStats.map((item) => {
+                            const width = stats.total > 0 ? `${(item.value / stats.total) * 100}%` : '0%';
+                            return (
+                                <div
+                                    key={item.label}
+                                    title={`${item.label}风险 ${item.value}`}
+                                    style={{ width, backgroundColor: item.color }}
+                                />
+                            );
+                        })}
+                    </div>
+                    <div className="mt-2 flex gap-3 text-xs text-gray-500">
+                        {levelStats.map((item) => (
+                            <span key={item.label}>{item.label}:{item.value}</span>
+                        ))}
+                    </div>
+                </div>
+            </div>
+
             <div className="bg-white flex-1 flex flex-col overflow-hidden p-[1rem] relative pb-0 rounded">
                 <div className="mb-4 flex items-center justify-between">
                     <div className="text-[1.25rem] text-black font-bold">
@@ -380,7 +465,7 @@ function RiskPageContent() {
                                 </span>
                             </div>
                             <span className='ml-[auto]'>
-                                <Button type="link" style={{ 'color': 'gray' }} size="small" onClick={() => setSelectedRowKeys([])}>
+                                <Button type="link" style={{ color: 'gray' }} size="small" onClick={() => setSelectedRowKeys([])}>
                                     取消选择
                                 </Button>
                                 <Button type="link" size="small" onClick={handleBatchDelete}>
@@ -394,25 +479,23 @@ function RiskPageContent() {
                 <div className="flex-1 overflow-y-auto">
                     <Table
                         rowSelection={rowSelection}
+                        rowKey="id"
                         columns={columns}
-                        dataSource={dataSource} 
+                        dataSource={dataSource}
                         loading={loading}
                         pagination={false}
                     />
                 </div>
 
-                {/* 分页区域 - 固定在底部 */}
-               
-                        <CustomPagination
-                            current={pagination.current}
-                            pageSize={pagination.pageSize}
-                            total={pagination.total}
-                            onChange={handlePageChange}
-                            showSizeChanger
-                            showQuickJumper
-                            pageSizeOptions={[10, 20, 50, 100]}
-                        />
-                
+                <CustomPagination
+                    current={pagination.current}
+                    pageSize={pagination.pageSize}
+                    total={pagination.total}
+                    onChange={handlePageChange}
+                    showSizeChanger
+                    showQuickJumper
+                    pageSizeOptions={[10, 20, 50, 100]}
+                />
             </div>
         </div>
     );

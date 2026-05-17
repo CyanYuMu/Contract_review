@@ -533,6 +533,23 @@ export default function ContractResult() {
             console.error('解析对比历史失败:', e);
           }
         }
+        const latestRaw = localStorage.getItem('comparison_result');
+        if (latestRaw) {
+          try {
+            const latestData = JSON.parse(latestRaw);
+            const latestPayload = latestData?.data ?? latestData;
+            const latestDiffs = latestPayload?.diffs ?? [];
+            if (Array.isArray(latestDiffs)) {
+              setComparisonResults(buildComparisonResults(latestDiffs));
+              setLoading(false);
+              setError(null);
+              localStorage.removeItem('comparison_result');
+              return;
+            }
+          } catch (e) {
+            console.error('解析最新对比结果失败:', e);
+          }
+        }
         // 从状态中获取文档ID
         const standardFileId = originalFile?.file_id;
         const comparisonFileId = comparisonFile?.file_id;

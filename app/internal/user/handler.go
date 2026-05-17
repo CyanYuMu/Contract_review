@@ -4,6 +4,7 @@ import (
 	"context"
 	"contract_review/app/internal/global"
 	"contract_review/app/pkg/consts/errno"
+	"errors"
 
 	"contract_review/app/pkg/response"
 	"github.com/cloudwego/hertz/pkg/app"
@@ -33,6 +34,10 @@ func (h *UserHandler) Register(ctx context.Context, c *app.RequestContext) {
 		Password: req.Password,
 	}); err != nil {
 		global.Log.Error("CreateUser error", zap.Error(err))
+		if errors.Is(err, errno.ErrAccountAlreadyExists) {
+			c.JSON(consts.StatusConflict, response.FailWithCode(errno.ErrUsernameTakenCode, "账号已存在"))
+			return
+		}
 		c.JSON(consts.StatusInternalServerError, response.FailWithCode(errno.ErrInternal, errno.Msg[errno.ErrInternal]))
 		return
 	}
@@ -86,24 +91,15 @@ func (h *UserHandler) Login(ctx context.Context, c *app.RequestContext) {
 // Logout 用户登出
 func (h *UserHandler) Logout(ctx context.Context, c *app.RequestContext) {
 	// 从 context 中获取用户信息
-	userIDInterface, _ := c.Get("accountID")
-	usernameInterface, _ := c.Get("username")
-
-	_, ok := userIDInterface.(uint)
+	accountInterface, _ := c.Get("account")
+	account, ok := accountInterface.(string)
 	if !ok {
-		global.Log.Error("Invalid userID type")
+		global.Log.Error("Invalid account type")
 		c.JSON(consts.StatusBadRequest, response.FailWithCode(errno.ErrInternal, "Invalid user info"))
 		return
 	}
 
-	username, ok := usernameInterface.(string)
-	if !ok {
-		global.Log.Error("Invalid username type")
-		c.JSON(consts.StatusBadRequest, response.FailWithCode(errno.ErrInternal, "Invalid user info"))
-		return
-	}
-
-	err := h.userService.Logout(ctx, username)
+	err := h.userService.Logout(ctx, account)
 	if err != nil {
 		global.Log.Error("Logout error", zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, response.FailWithCode(errno.ErrInternal, errno.Msg[errno.ErrInternal]))
@@ -207,15 +203,15 @@ func (h *UserHandler) UpdateUser(ctx context.Context, c *app.RequestContext) {
 
 // GetUserInfo 获取用户信息
 func (h *UserHandler) GetUserInfo(ctx context.Context, c *app.RequestContext) {
-	userIDInterface, _ := c.Get("accountID")
-	userID, ok := userIDInterface.(uint)
+	accountInterface, _ := c.Get("account")
+	account, ok := accountInterface.(string)
 	if !ok {
-		global.Log.Error("Invalid userID type")
+		global.Log.Error("Invalid account type")
 		c.JSON(consts.StatusBadRequest, response.FailWithCode(errno.ErrInternal, "Invalid user info"))
 		return
 	}
 
-	user, err := h.userService.GetUserInfo(ctx, userID)
+	user, err := h.userService.GetUserInfoByAccount(ctx, account)
 	if err != nil {
 		global.Log.Error("GetUserInfo error", zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, response.FailWithCode(errno.ErrInternal, errno.Msg[errno.ErrInternal]))

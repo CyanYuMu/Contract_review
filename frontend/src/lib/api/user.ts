@@ -1,6 +1,15 @@
 import client from '@/utils/client';
 import type { AxiosError } from 'axios';
 import { getCachedUser, setCachedUser } from '@/utils/userCache';
+import type { User } from '@/lib/Interface';
+
+type UserResponsePayload = User | { user?: User };
+
+const normalizeUser = (payload: UserResponsePayload | null | undefined): User | null => {
+    if (!payload) return null;
+    if ('user' in payload && payload.user) return payload.user;
+    return payload as User;
+};
 
 /**
  * 获取用户信息
@@ -12,26 +21,27 @@ export const getUserInfo = async (forceRefresh = false) => {
     if (!forceRefresh) {
         const cachedUser = getCachedUser();
         if (cachedUser) {
-            return cachedUser;
+            return normalizeUser(cachedUser);
         }
     }
 
     try {
         const response = await client.get('/user/me');
 
-        let userData;
+        let userData: UserResponsePayload | null;
         if (response.data && response.data.data) {
             userData = response.data.data;
         } else {
             userData = response.data;
         }
+        const normalizedUser = normalizeUser(userData);
 
         // 缓存用户信息
-        if (userData) {
-            setCachedUser(userData);
+        if (normalizedUser) {
+            setCachedUser(normalizedUser);
         }
 
-        return userData;
+        return normalizedUser;
     } catch (error) {
         const axiosErr = error as AxiosError<{ message?: string; msg?: string }>; 
         if (axiosErr.response) {

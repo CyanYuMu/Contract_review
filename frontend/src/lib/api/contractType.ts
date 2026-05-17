@@ -21,6 +21,7 @@ export type ContractTypePageRequest = {
 // 合同类型列表项
 export type ContractTypeListItem = {
     id: string;
+    name?: string;
     contractTypeName: string;
     templateContent?: string | null;
     creator: string;

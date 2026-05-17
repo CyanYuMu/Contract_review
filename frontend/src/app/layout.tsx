@@ -1,3 +1,4 @@
+import '@ant-design/v5-patch-for-react-19';
 import type { Metadata } from "next";
 import "./globals.css";
 import { Toaster } from "react-hot-toast";

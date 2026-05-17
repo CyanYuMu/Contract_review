@@ -17,9 +17,14 @@ export const startComparisonTask = async (standardFileId: number, comparisonFile
         });
         return response.data;
     } catch (error) {
-        const axiosErr = error as AxiosError<{ message?: string }>;
+        const axiosErr = error as AxiosError<{ message?: string; msg?: string; error?: string; details?: string }>;
         if (axiosErr.response) {
-            const message = axiosErr.response.data?.message || `比对任务启动失败（${axiosErr.response.status}）`;
+            const message =
+                axiosErr.response.data?.message ||
+                axiosErr.response.data?.msg ||
+                axiosErr.response.data?.error ||
+                axiosErr.response.data?.details ||
+                `比对任务启动失败（${axiosErr.response.status}）`;
             throw new Error(message);
         } else if (axiosErr.request) {
             throw new Error('网络连接失败，请检查网络');

@@ -16,6 +16,11 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	sessionTypeCompare       = "compare"
+	legacySessionTypeCompare = "comparison"
+)
+
 // ComparisonService 比对服务
 type ComparisonService struct {
 	comparisonRepo *ComparisonRepo
@@ -40,7 +45,12 @@ func NewComparisonService(
 }
 
 // StartComparison 启动比对任务
-func (s *ComparisonService) StartComparison(ctx context.Context, userID uint64, req *StartComparisonRequest) (*ComparisonTaskResponse, error) {
+func (s *ComparisonService) StartComparison(ctx context.Context, account string, req *StartComparisonRequest) (*ComparisonTaskResponse, error) {
+	userID, err := s.resolveUserID(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+
 	// 1. 获取标准文档和比对文档
 	stdFile, err := s.contractRepo.GetContractByID(ctx, req.StandardFileID)
 	if err != nil || stdFile == nil {
@@ -58,11 +68,13 @@ func (s *ComparisonService) StartComparison(ctx context.Context, userID uint64, 
 	}
 
 	// 3. 验证文件是否存在
-	if _, err := os.Stat(stdFile.FilePath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("标准文档文件不存在: %s", stdFile.FilePath)
+	stdPath := contract.LocalFilePath(stdFile.FilePath)
+	cmpPath := contract.LocalFilePath(cmpFile.FilePath)
+	if _, err := os.Stat(stdPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("标准文档文件不存在: %s", stdPath)
 	}
-	if _, err := os.Stat(cmpFile.FilePath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("比对文档文件不存在: %s", cmpFile.FilePath)
+	if _, err := os.Stat(cmpPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("比对文档文件不存在: %s", cmpPath)
 	}
 
 	// 4. 确保或创建会话
@@ -97,7 +109,7 @@ func (s *ComparisonService) StartComparison(ctx context.Context, userID uint64, 
 	}
 
 	// 6. 执行文档比对
-	diffResult, err := s.compareDocuments(stdFile.FilePath, cmpFile.FilePath)
+	diffResult, err := s.compareDocuments(stdPath, cmpPath)
 	if err != nil {
 		s.comparisonRepo.UpdateStatus(ctx, task.ID, "failed")
 		return nil, fmt.Errorf("文档比对失败: %w", err)
@@ -139,8 +151,8 @@ func (s *ComparisonService) ensureComparisonSession(ctx context.Context, userID,
 		if sess.UserID != userID {
 			return 0, fmt.Errorf("无权限访问此会话")
 		}
-		if sess.SessionType != "comparison" {
-			return 0, fmt.Errorf("会话类型必须为comparison")
+		if sess.SessionType != sessionTypeCompare && sess.SessionType != legacySessionTypeCompare {
+			return 0, fmt.Errorf("会话类型必须为compare")
 		}
 		return sess.ID, nil
 	}
@@ -156,7 +168,7 @@ func (s *ComparisonService) ensureComparisonSession(ctx context.Context, userID,
 		Title       string
 		SessionType string
 	}
-	newSess := sessionRow{UserID: userID, Title: sessionTitle, SessionType: "comparison"}
+	newSess := sessionRow{UserID: userID, Title: sessionTitle, SessionType: sessionTypeCompare}
 	if err := s.db.WithContext(ctx).Table("sessions").Create(&newSess).Error; err != nil {
 		return 0, fmt.Errorf("创建会话失败: %w", err)
 	}
@@ -212,9 +224,23 @@ func (s *ComparisonService) GetComparisonTaskBySession(ctx context.Context, sess
 }
 
 // ListUserComparisonTasks 获取用户比对任务列表
-func (s *ComparisonService) ListUserComparisonTasks(ctx context.Context, userID uint64, page, pageSize int) ([]ComparisonTask, int64, error) {
+func (s *ComparisonService) ListUserComparisonTasks(ctx context.Context, account string, page, pageSize int) ([]ComparisonTask, int64, error) {
+	userID, err := s.resolveUserID(ctx, account)
+	if err != nil {
+		return nil, 0, err
+	}
 	offset := (page - 1) * pageSize
 	return s.comparisonRepo.ListByUserID(ctx, userID, offset, pageSize)
+}
+
+func (s *ComparisonService) resolveUserID(ctx context.Context, account string) (uint64, error) {
+	var userRecord struct {
+		ID uint64 `gorm:"column:id"`
+	}
+	if err := s.db.WithContext(ctx).Table("users").Select("id").Where("account = ?", account).First(&userRecord).Error; err != nil {
+		return 0, fmt.Errorf("获取用户信息失败: %w", err)
+	}
+	return userRecord.ID, nil
 }
 
 // GetComparisonResult 获取比对结果详情

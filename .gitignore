@@ -39,6 +39,17 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# Frontend (Next.js + pnpm)
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+frontend/.eslintcache
+frontend/pnpm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/npm-debug.log*
+
 # Logs
 *.log
 logs/
@@ -48,6 +59,26 @@ logs/
 
 # Config with secrets - DO NOT commit
 app/config/config.yaml
+app/config/*.yaml
+app/config/*.yml
+app/config/*.json
+!app/config/*.example.yaml
+!app/config/*.example.yml
+!app/config/*.example.json
+
+# Docker compose files (may contain secrets)
+docker-compose*.yaml
+docker-compose*.yml
+!docker-compose*.example.yaml
+!docker-compose*.example.yml
+
+# Contract documents
+*.docx
+*.doc
+*.pdf
+
+# Uploads directory (contains user uploaded contracts)
+uploads/
 
 # Strange directories
 ~/
@@ -67,3 +98,4 @@ temp/
 # Database files (if using local db)
 *.db
 *.sqlite
+/frontend/tsconfig.tsbuildinfo

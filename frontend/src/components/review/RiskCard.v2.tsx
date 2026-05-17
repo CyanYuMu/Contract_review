@@ -1,4 +1,4 @@
-import React, {useEffect, useRef, useState} from "react";
+import React, {useEffect, useMemo, useRef, useState} from "react";
 import {Button, Modal, Switch} from "antd";
 import toast from "react-hot-toast";
 import {RiskResponse} from "@/lib/Interface";
@@ -273,6 +273,30 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
         }
     };
 
+    const sortedRiskData = useMemo(
+        () => [...riskDataList].sort((a, b) => a.index - b.index),
+        [riskDataList]
+    );
+    const riskOverview = useMemo(() => {
+        const levelCount = {high: 0, medium: 0, low: 0};
+        const typeCount = new Map<string, number>();
+        sortedRiskData.forEach((item) => {
+            if (item.risk_level?.includes("高")) levelCount.high += 1;
+            else if (item.risk_level?.includes("低")) levelCount.low += 1;
+            else levelCount.medium += 1;
+
+            const type = item.risk_type || "未分类";
+            typeCount.set(type, (typeCount.get(type) || 0) + 1);
+        });
+        return {
+            levelCount,
+            topTypes: Array.from(typeCount.entries())
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 3),
+        };
+    }, [sortedRiskData]);
+    const totalRiskCount = sortedRiskData.length || 1;
+
     // 空列表处理：区分"审查中"和"已全部修订"
     if (riskDataList.length === 0) {
         // 正在审查中（还没有数据）
@@ -298,8 +322,6 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
             </div>
         );
     }
-
-    const sortedRiskData = [...riskDataList].sort((a, b) => a.index - b.index);
 
     return (
         <>
@@ -364,6 +386,37 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
                     </div>
                 </div>
 
+                <div className="mx-auto w-[31.63rem] bg-white border border-[#e8edf7] rounded-[0.31rem] p-3">
+                    <div className="flex h-2 overflow-hidden rounded bg-[#eef2f7]">
+                        <div
+                            className="bg-[#ff4d4f]"
+                            style={{width: `${(riskOverview.levelCount.high / totalRiskCount) * 100}%`}}
+                        />
+                        <div
+                            className="bg-[#faad14]"
+                            style={{width: `${(riskOverview.levelCount.medium / totalRiskCount) * 100}%`}}
+                        />
+                        <div
+                            className="bg-[#52c41a]"
+                            style={{width: `${(riskOverview.levelCount.low / totalRiskCount) * 100}%`}}
+                        />
+                    </div>
+                    <div className="mt-2 flex items-center justify-between text-[0.75rem] text-[#555]">
+                        <span>高 {riskOverview.levelCount.high}</span>
+                        <span>中 {riskOverview.levelCount.medium}</span>
+                        <span>低 {riskOverview.levelCount.low}</span>
+                    </div>
+                    {riskOverview.topTypes.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-2 text-[0.75rem]">
+                            {riskOverview.topTypes.map(([type, count]) => (
+                                <span key={type} className="rounded border border-[#dbe6ff] bg-[#f6f9ff] px-2 py-1 text-[#2260F2]">
+                                    {type} {count}
+                                </span>
+                            ))}
+                        </div>
+                    )}
+                </div>
+
                 {sortedRiskData.map((item: RiskResponse) => (
                     <div
                         key={item.id}
@@ -391,6 +444,11 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
                                     {item.risk_level}
                                 </span>
                             </div>
+                            {item.risk_type && (
+                                <span className="ml-3 rounded border border-[#dbe6ff] bg-[#f6f9ff] px-2 py-[0.13rem] text-[0.75rem] text-[#2260F2]">
+                                    {item.risk_type}
+                                </span>
+                            )}
 
                             <div
                                 className="flex gap-2 ml-auto"
@@ -433,6 +491,12 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
                                     {extractTextFromHTML(item.suggested_content)}
                                 </div>
                             </div>
+                            {item.reason && (
+                                <div className="mt-2">
+                                    <span className="text-[1rem] font-medium">修改理由：</span>
+                                    <div>{item.reason}</div>
+                                </div>
+                            )}
                         </div>
                     </div>
                 ))}

@@ -10,7 +10,7 @@ export const register = async (data: RegisterRequest) => {
         const axiosErr = error as AxiosError<{ message?: string; msg?: string }>;
         if (axiosErr.response) {
             const status = axiosErr.response.status;
-            if (status === 400) {
+            if (status === 409) {
                 throw new Error("用户名已存在！")
             }
             const message = axiosErr.response.data?.message || axiosErr.response.data?.msg || `注册失败（${axiosErr.response.status}）`;

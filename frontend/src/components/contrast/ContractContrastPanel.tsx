@@ -1,179 +1,120 @@
 'use client';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { message, Spin } from 'antd';
 import { LoadingOutlined } from '@ant-design/icons';
 import type { Editor } from '@/lib/canvas-editor/editor';
-import ContractContrastUploader from '@/components/ContractContrastUploader';
+import ContractContrastUploader, { type UploadedContrastFile } from '@/components/ContractContrastUploader';
 import { useRouter } from 'next/navigation';
 import { UploadStore } from '@/store/uploadStore';
 import { ContrastuploadStore } from '@/store/ContrastuploadStore';
 import { startComparisonTask } from '@/lib/api/contrastApi';
-import { createSession } from '@/lib/api/createSession';
 interface ContractContrastPanelProps {
   editor?: Editor | null;
 }
 
-export default function ContractContrastPanel({ editor }: ContractContrastPanelProps) {
-  const [originalFile, setOriginalFile] = useState<string | null>(null);
-  const [comparisonFile, setComparisonFile] = useState<string | null>(null);
+type ContrastFileState = Partial<UploadedContrastFile>;
+
+export default function ContractContrastPanel({ editor: _editor }: ContractContrastPanelProps) {
+  void _editor;
   const [originalFileName, setOriginalFileName] = useState<string | null>(null);
   const [comparisonFileName, setComparisonFileName] = useState<string | null>(null);
   const [originalFileId, setOriginalFileId] = useState<number | null>(null);
   const [comparisonFileId, setComparisonFileId] = useState<number | null>(null);
   const [isComparing, setIsComparing] = useState<boolean>(false);
+  const originalFileRef = useRef<ContrastFileState>({});
+  const comparisonFileRef = useRef<ContrastFileState>({});
+  const isComparingRef = useRef(false);
+  const startedKeyRef = useRef<string | null>(null);
   const router = useRouter();
   const setData = UploadStore((state) => state.setData);
   const { originalFile: storeOriginalFile, comparisonFile: storeComparisonFile } = ContrastuploadStore();
+
+  const syncOriginalFile = useCallback((file: ContrastFileState) => {
+    originalFileRef.current = { ...originalFileRef.current, ...file };
+    setOriginalFileName(originalFileRef.current.title || null);
+    setOriginalFileId(originalFileRef.current.file_id || null);
+
+    setData({
+      original_file_url: originalFileRef.current.file_url,
+      original_file_title: originalFileRef.current.title,
+      original_file_type: originalFileRef.current.file_type,
+      original_file_id: originalFileRef.current.file_id
+    });
+  }, [setData]);
+
+  const syncComparisonFile = useCallback((file: ContrastFileState) => {
+    comparisonFileRef.current = { ...comparisonFileRef.current, ...file };
+    setComparisonFileName(comparisonFileRef.current.title || null);
+    setComparisonFileId(comparisonFileRef.current.file_id || null);
+
+    setData({
+      comparison_file_url: comparisonFileRef.current.file_url,
+      comparison_file_title: comparisonFileRef.current.title,
+      comparison_file_type: comparisonFileRef.current.file_type,
+      comparison_file_id: comparisonFileRef.current.file_id
+    });
+  }, [setData]);
 
   // 从store中同步持久化的数据到本地state
   useEffect(() => {
     // 同步标准文档数据
     if (storeOriginalFile.file_url) {
-      setOriginalFile(storeOriginalFile.file_url);
-      setOriginalFileName(storeOriginalFile.title || null);
-      setOriginalFileId(storeOriginalFile.file_id || null);
-      
-      // 同时更新UploadStore，确保与合同审阅功能保持一致
-      setData({
-        original_file_url: storeOriginalFile.file_url,
-        original_file_title: storeOriginalFile.title || '',
-        original_file_type: storeOriginalFile.file_type || '' ,
-        original_file_id: storeOriginalFile.file_id
-      });
+      syncOriginalFile(storeOriginalFile);
     }
     
     // 同步对比文档数据
     if (storeComparisonFile.file_url) {
-      setComparisonFile(storeComparisonFile.file_url);
-      setComparisonFileName(storeComparisonFile.title || null);
-      setComparisonFileId(storeComparisonFile.file_id || null);
-      
-      // 同时更新UploadStore，确保与合同审阅功能保持一致
-      setData({
-        comparison_file_url: storeComparisonFile.file_url,
-        comparison_file_title: storeComparisonFile.title,
-        comparison_file_type: storeComparisonFile.file_type,
-        comparison_file_id: storeComparisonFile.file_id
-      });
+      syncComparisonFile(storeComparisonFile);
     }
-  }, [storeOriginalFile, storeComparisonFile, setData]);
+  }, [storeOriginalFile, storeComparisonFile, syncOriginalFile, syncComparisonFile]);
   
-  type ComparisonItem =
-  | { id: string; type: 'added' | 'deleted'; content: string; position: string }
-  | { id: string; type: 'modified'; original: string; modified: string; position: string };
-
-  const handleGotoPosition = (position: string) => {
-    // 使用editor实例定位到指定位置
-    if (editor) {
-      // 这里需要根据实际的editor API实现定位逻辑
-      console.log('跳转到', position);
-    }
-  };
-
   // 处理原始文件上传成功
-  const handleOriginalUploadSuccess = () => {
-    const fileUrl = localStorage.getItem('original_file_url');
-    const fileName = localStorage.getItem('original_file_title');
-    const fileType = localStorage.getItem('original_file_type');
-    const fileId = localStorage.getItem('original_file_id');
-    
-    console.log('原始文件上传成功:', { fileUrl, fileName, fileType, fileId });
-    
-    setOriginalFile(fileUrl || null);
-    setOriginalFileName(fileName || null);
-    setOriginalFileId(fileId ? Number(fileId) : null);
-    
-    // 保存到全局状态
-    setData({
-      original_file_url: fileUrl ?? undefined,
-      original_file_title: fileName ?? undefined,
-      original_file_type: fileType ?? undefined,
-      original_file_id: fileId ? Number(fileId) : undefined
-    });
+  const handleOriginalUploadSuccess = (file: UploadedContrastFile) => {
+    console.log('原始文件上传成功:', file);
+    syncOriginalFile(file);
     
     message.success('标准文档上传成功');
     
-    // 如果两个文件都已上传，启动对比任务
-    console.log('检查是否启动对比任务:', { comparisonFile, comparisonFileId });
-    if (comparisonFile && comparisonFileId) {
-      console.log('启动对比任务');
-      startComparison();
-    }
+    startComparison(file.file_id, comparisonFileRef.current.file_id, file.title, comparisonFileRef.current.title);
   };
 
   // 处理对比文件上传成功
-  const handleComparisonUploadSuccess = () => {
-    const fileUrl = localStorage.getItem('comparison_file_url');
-    const fileName = localStorage.getItem('comparison_file_title');
-    const fileType = localStorage.getItem('comparison_file_type');
-    const fileId = localStorage.getItem('comparison_file_id');
-    
-    console.log('对比文件上传成功:', { fileUrl, fileName, fileType, fileId });
-    
-    setComparisonFile(fileUrl || null);
-    setComparisonFileName(fileName || null);
-    setComparisonFileId(fileId ? Number(fileId) : null);
-    
-    // 保存到全局状态
-    setData({
-      comparison_file_url: fileUrl ?? undefined,
-      comparison_file_title: fileName ?? undefined,
-      comparison_file_type: fileType ?? undefined,
-      comparison_file_id: fileId ? Number(fileId) : undefined
-    });
+  const handleComparisonUploadSuccess = (file: UploadedContrastFile) => {
+    console.log('对比文件上传成功:', file);
+    syncComparisonFile(file);
     
     message.success('对比文档上传成功');
     
-    // 如果两个文件都已上传，启动对比任务
-    console.log('检查是否启动对比任务:', { originalFile, originalFileId });
-    if (originalFile && originalFileId) {
-      console.log('启动对比任务');
-      startComparison();
-    }
+    startComparison(originalFileRef.current.file_id, file.file_id, originalFileRef.current.title, file.title);
   };
 
-  // 监听两个文件都上传成功的情况
-  useEffect(() => {
-    if (originalFileId && comparisonFileId && originalFileName && comparisonFileName) {
-      console.log('检测到两个文件都已上传，自动启动对比任务');
-      startComparison();
-    }
-  }, [originalFileId, comparisonFileId, originalFileName, comparisonFileName]);
-
   // 启动对比任务
-  const startComparison = async () => {
-    console.log('开始启动对比任务:', { originalFileId, comparisonFileId });
+  const startComparison = useCallback(async (
+    standardId = originalFileId,
+    comparisonId = comparisonFileId,
+    standardName = originalFileName || undefined,
+    comparisonName = comparisonFileName || undefined
+  ) => {
+    console.log('开始启动对比任务:', { standardId, comparisonId });
     
-    if (!originalFileId || !comparisonFileId) {
-      message.error('文件信息不完整，无法启动对比任务');
+    if (!standardId || !comparisonId) {
       console.log('文件信息不完整，无法启动对比任务');
       return;
     }
+    const taskKey = `${standardId}:${comparisonId}`;
+    if (isComparingRef.current || startedKeyRef.current === taskKey) {
+      return;
+    }
+    isComparingRef.current = true;
+    startedKeyRef.current = taskKey;
     
     setIsComparing(true);
     try {
-      message.loading('正在创建会话...', 0);
-      
-      // 创建会话
-      const sessionData = {
-        title: `合同比对：${originalFileName} vs ${comparisonFileName}`,
-        session_type: 'compare'
-      };
-      
-      console.log('创建会话:', sessionData);
-      const sessionResult = await createSession(sessionData);
-      const sessionId = sessionResult.session_id;
-      
-      console.log('会话创建成功:', sessionId);
-      
-    
-      
-      message.destroy();
       message.loading('正在启动对比任务...', 0);
+      const comparisonTitle = `合同比对：${standardName || '标准文档'} vs ${comparisonName || '比对文档'}`;
       
-      // 调用对比任务接口，并传递sessionId
-      console.log('调用对比任务接口:', { originalFileId, comparisonFileId, sessionId });
-      const result = await startComparisonTask(originalFileId, comparisonFileId, `合同比对：${originalFileName} vs ${comparisonFileName}`, sessionId);
+      console.log('调用对比任务接口:', { standardId, comparisonId });
+      const result = await startComparisonTask(standardId, comparisonId, comparisonTitle);
       
       console.log('对比任务接口调用成功:', result);
       
@@ -187,14 +128,24 @@ export default function ContractContrastPanel({ editor }: ContractContrastPanelP
       console.log('跳转到对比结果页面');
       router.push('/result');
     } catch (error) {
+      startedKeyRef.current = null;
       message.destroy();
       const errorMessage = (error as Error).message || '对比任务启动失败，请重试';
       message.error(errorMessage);
       console.log('对比任务启动失败:', errorMessage);
     } finally {
+      isComparingRef.current = false;
       setIsComparing(false);
     }
-  };
+  }, [comparisonFileId, comparisonFileName, originalFileId, originalFileName, router]);
+
+  // 监听两个文件都上传成功的情况
+  useEffect(() => {
+    if (originalFileId && comparisonFileId && originalFileName && comparisonFileName) {
+      console.log('检测到两个文件都已上传，自动启动对比任务');
+      startComparison(originalFileId, comparisonFileId, originalFileName, comparisonFileName);
+    }
+  }, [originalFileId, comparisonFileId, originalFileName, comparisonFileName, startComparison]);
 
 
 return (

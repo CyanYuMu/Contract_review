@@ -1,4 +1,11 @@
-export type User = { id: number; username: string; is_active: boolean };
+export type User = {
+    id?: number;
+    userId?: number;
+    account?: string;
+    username: string;
+    is_active?: boolean;
+    permissions?: Record<string, boolean>;
+};
 export type ApiError = Error & { status?: number };
 export interface SessionListParams {
     page?: number;
@@ -43,11 +50,12 @@ export interface GenericResponse<T> {
 }
 
 export interface LoginRequest {
-    identifier: string;
+    account: string;
     password: string;
 }
 
 export interface RegisterRequest {
+    account: string;
     username: string;
     password: string;
 }
@@ -62,6 +70,7 @@ export interface TokenResponse {
     access_token: string;
     token_type: string;
     refresh_token: string;
+    expires_in?: number;
 }
 
 export interface GetUserConversationRequest {
@@ -150,8 +159,10 @@ export interface RiskResponse {
     index: number;
     original_content: string;
     risk_level: string;
+    risk_type?: string;
     risk_analysis: string;
     suggested_content: string;
+    reason?: string;
     is_accepted: boolean;
     created_at: string;
 }

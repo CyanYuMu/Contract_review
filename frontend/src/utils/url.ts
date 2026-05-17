@@ -1,8 +1,20 @@
 export const resolveFileUrl = (url?: string): string => {
     if (!url) return "";
 
-    // Already an absolute or data URL
-    if (/^(https?:|data:|blob:|file:)/i.test(url)) {
+    if (url.startsWith("/api/static/") || url.startsWith("/uploads/") || url.startsWith("uploads/")) {
+        return buildStaticFileUrl(url);
+    }
+
+    if (/^https?:\/\//i.test(url)) {
+        const pathname = new URL(url).pathname;
+        if (pathname.startsWith("/api/static/") || pathname.startsWith("/uploads/")) {
+            return buildStaticFileUrl(url);
+        }
+        return url;
+    }
+
+    // Already a data, blob, or file URL
+    if (/^(data:|blob:|file:)/i.test(url)) {
         return url;
     }
 
@@ -24,56 +36,55 @@ export const resolveFileUrl = (url?: string): string => {
 };
 
 export const buildStaticFileUrl = (fileUrl?: string): string => {
-     if (!fileUrl) {
+  if (!fileUrl) {
     throw new Error('fileUrl is required');
   }
 
- 
+  const getFrontendOrigin = () => {
+    if (typeof window !== 'undefined') {
+      return window.location.origin;
+    }
+    return process.env.NEXT_SERVER_URL || 'http://localhost:3000';
+  };
+
+  const toProxyUrl = (path: string) => {
+    let proxyPath = path;
+    if (proxyPath.startsWith('/api/static/')) {
+      proxyPath = proxyPath.replace(/^\/api\/static(?=\/|$)/, '/api/proxy/static');
+    } else if (proxyPath.startsWith('/uploads/')) {
+      proxyPath = `/api/proxy/static${proxyPath.slice('/uploads'.length)}`;
+    } else if (proxyPath.startsWith('uploads/')) {
+      proxyPath = `/api/proxy/static/${proxyPath.slice('uploads/'.length)}`;
+    }
+
+    if (/^\/api\/proxy\/static\//.test(proxyPath)) {
+      return getFrontendOrigin() + proxyPath;
+    }
+
+    return proxyPath;
+  };
+
   if (/^https?:\/\//.test(fileUrl)) {
-    console.log("进入https")
     try {
       const url = new URL(fileUrl);
       const path = url.pathname + url.search;
-      const proxyPath = path.replace(/^\/api\/static(?=\/| $ )/, '/api/proxy/static');
-
-      let origin: string;
-      if (typeof window !== 'undefined') {
-        origin = window.location.origin;
-      } 
-       else {
-        origin = process.env.NEXT_PUBLIC_DEV_URL || 'http://localhost:3000';
-      }
-      return origin + proxyPath;
+      const proxyUrl = toProxyUrl(path);
+      return proxyUrl === path ? fileUrl : proxyUrl;
     } catch (error) {
       console.error('Failed to parse full URL:', { fileUrl, error });
       throw error;
     }
   }
 
-
-  if (fileUrl.startsWith('/api/static/')) {
-        console.log("进入/api/static/")
-        const proxyPath = fileUrl.replace(/^\/api\/static(?=\/| $ )/, '/api/proxy/static');
-
-    // 客户端：使用当前 origin
-    if (typeof window !== 'undefined') {
-      return window.location.origin + proxyPath;
-    }
-
-
-    // fallback
-    const fallback = process.env.NEXT_PUBLIC_DEV_URL || '';
-    if (!fallback) {
-
-      throw new Error(
-        'Cannot determine origin: provide `req` in server context or set NEXT_PUBLIC_DEV_URL'
-      );
-    }
-    return fallback + proxyPath;
+  if (
+    fileUrl.startsWith('/api/static/') ||
+    fileUrl.startsWith('/uploads/') ||
+    fileUrl.startsWith('uploads/')
+  ) {
+    return toProxyUrl(fileUrl);
   }
 
   // 不符合预期格式，原样返回或报错
   console.warn('Unexpected fileUrl format, returning as-is:', fileUrl);
   return fileUrl;
 };
-

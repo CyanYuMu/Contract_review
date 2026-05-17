@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -98,30 +99,106 @@ func (ra *RiskAgent) extractFindings(output *AgentOutput, clauseID string) []Ris
 		return nil
 	}
 
-	resultStr, ok := output.Result.(string)
-	if !ok {
-		return nil
+	var resultStr string
+	if str, ok := output.Result.(string); ok {
+		resultStr = str
+	} else if output.Result != nil {
+		if bytes, err := json.Marshal(output.Result); err == nil {
+			resultStr = string(bytes)
+		}
 	}
 
 	var findings []RiskFinding
 
-	for _, step := range output.Thinking {
-		if step.Action == "tool_call" && strings.Contains(step.ActionInput, "rule_verifier") {
-			if strings.Contains(step.Observation, "\"is_verified\":true") ||
-				strings.Contains(step.Observation, "\"is_verified\": true") {
-				finding := RiskFinding{
-					ClauseID: clauseID,
-					Verified: true,
+	if resultStr != "" {
+		findings = parseRiskFindingsFromJSON(resultStr, clauseID)
+		if len(findings) == 0 {
+			findings = parseRiskFindingsFromText(resultStr, clauseID)
+		}
+	}
+
+	if len(findings) == 0 {
+		for _, step := range output.Thinking {
+			if step.Action == "tool_call" && strings.Contains(step.ActionInput, "rule_verifier") {
+				if strings.Contains(step.Observation, "\"is_verified\":true") ||
+					strings.Contains(step.Observation, "\"is_verified\": true") {
+					findings = append(findings, RiskFinding{
+						ClauseID:        clauseID,
+						RiskLevel:       "中",
+						RiskDescription: "规则验证确认存在风险，请结合审阅记录复核。",
+						Verified:        true,
+					})
 				}
-				findings = append(findings, finding)
 			}
 		}
 	}
 
-	if len(findings) == 0 && resultStr != "" {
-		findings = parseRiskFindingsFromText(resultStr, clauseID)
+	return findings
+}
+
+func parseRiskFindingsFromJSON(text string, clauseID string) []RiskFinding {
+	jsonStr := extractJSONArray(text)
+	if jsonStr == "" {
+		jsonStr = extractJSON(text)
+	}
+	if jsonStr == "" {
+		return nil
 	}
 
+	type rawFinding struct {
+		ClauseID        string       `json:"clause_id"`
+		RiskType        string       `json:"risk_type"`
+		RiskLevel       string       `json:"risk_level"`
+		RiskDescription string       `json:"risk_description"`
+		Description     string       `json:"description"`
+		OriginalText    string       `json:"original_text"`
+		LegalBasis      []LegalBasis `json:"legal_basis"`
+		Verified        bool         `json:"verified"`
+		Confidence      float64      `json:"confidence"`
+	}
+
+	var arr []rawFinding
+	if strings.HasPrefix(strings.TrimSpace(jsonStr), "{") {
+		var wrapper struct {
+			Findings []rawFinding `json:"findings"`
+			Risks    []rawFinding `json:"risks"`
+		}
+		if err := json.Unmarshal([]byte(jsonStr), &wrapper); err != nil {
+			return nil
+		}
+		if len(wrapper.Findings) > 0 {
+			arr = wrapper.Findings
+		} else {
+			arr = wrapper.Risks
+		}
+	} else if err := json.Unmarshal([]byte(jsonStr), &arr); err != nil {
+		return nil
+	}
+
+	findings := make([]RiskFinding, 0, len(arr))
+	for _, item := range arr {
+		desc := item.RiskDescription
+		if desc == "" {
+			desc = item.Description
+		}
+		if strings.TrimSpace(desc) == "" && strings.TrimSpace(item.OriginalText) == "" {
+			continue
+		}
+		id := item.ClauseID
+		if id == "" {
+			id = clauseID
+		}
+		findings = append(findings, RiskFinding{
+			ClauseID:        id,
+			RiskType:        item.RiskType,
+			RiskLevel:       normalizeRiskLevel(item.RiskLevel),
+			RiskDescription: desc,
+			OriginalText:    item.OriginalText,
+			LegalBasis:      item.LegalBasis,
+			Verified:        item.Verified,
+			Confidence:      item.Confidence,
+		})
+	}
 	return findings
 }
 
@@ -165,6 +242,19 @@ func parseRiskFindingsFromText(text string, clauseID string) []RiskFinding {
 	}
 
 	return findings
+}
+
+func normalizeRiskLevel(level string) string {
+	if strings.Contains(level, "高") {
+		return "高"
+	}
+	if strings.Contains(level, "中") {
+		return "中"
+	}
+	if strings.Contains(level, "低") {
+		return "低"
+	}
+	return "中"
 }
 
 func extractValue(line string) string {
@@ -218,25 +308,33 @@ func buildRiskIdentificationPrompt(clause Clause, meta ContractMeta) string {
 
 ## 工作步骤（必须按顺序执行）
 1. 仔细阅读条款内容，初步识别可能的风险点
-2. 对每个风险点，调用 rag_search 工具检索相关审阅规范和法律条例
+2. 对每个风险点，调用 rag_search 工具检索相关审阅规范、法律条例和已配置风险点；调用时必须传入 contract_type="%s"
 3. 将条款内容、风险描述和检索到的规范一起提交给 rule_verifier 工具验证
 4. 只输出经过验证的风险点
 
 %s
 
 ## 输出要求
-对每个经过验证的风险点，请提供：
-- 风险类型（15字以内）
-- 风险等级（高/中/低）
-- 风险描述
-- 原文摘录（100字以内）
-- 法律依据（来自RAG检索的审阅规范）
-- 验证状态（已验证/待验证）
-- 置信度（0.0-1.0）`,
+请在完成工具检索和验证后，以 JSON 输出，格式如下：
+{
+  "findings": [
+    {
+      "clause_id": "%s",
+      "risk_type": "风险类型（15字以内）",
+      "risk_level": "高/中/低",
+      "risk_description": "风险描述",
+      "original_text": "原文摘录（100字以内）",
+      "legal_basis": [{"source":"依据来源","article":"条款编号","content":"依据摘要","relevance":0.8}],
+      "verified": true,
+      "confidence": 0.0
+    }
+  ]
+}
+如无风险，输出 {"findings": []}。`,
 		meta.Stance, meta.PartyA, meta.PartyB, meta.ContractType,
 		meta.Stance, meta.Intensity,
 		clause.ID, clause.Title, clause.Category,
-		clause.Content, desc)
+		clause.Content, meta.ContractType, desc, clause.ID)
 }
 
 const riskAgentSystemPrompt = `你是一名资深合同审查律师，擅长识别合同条款中的法律风险。

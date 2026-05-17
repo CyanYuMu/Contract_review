@@ -3,12 +3,13 @@ package agent
 import (
 	"context"
 	"contract_review/app/internal/global"
+	"contract_review/app/internal/llm"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
-	"github.com/cloudwego/eino-ext/components/model/arkbot"
+	fmodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
@@ -16,20 +17,16 @@ import (
 
 // ContractAgent 合同解析智能体
 type ContractAgent struct {
-	llm            *arkbot.ChatModel
+	llm            fmodel.BaseChatModel
 	promptTemplate string
 }
 
 // NewContractAgent 创建合同解析智能体
 func NewContractAgent(ctx context.Context) (*ContractAgent, error) {
 	// 初始化LLM
-	llm, err := arkbot.NewChatModel(ctx,
-		&arkbot.Config{
-			Model:  global.Config.LLMConfig.Model,
-			APIKey: global.Config.LLMConfig.APIKey,
-		})
+	chatModel, err := llm.NewChatModel(ctx)
 	if err != nil {
-		global.Log.Error("init arkbot model failed", zap.Error(err))
+		global.Log.Error("init chat model failed", zap.Error(err))
 		return nil, err
 	}
 
@@ -42,7 +39,7 @@ func NewContractAgent(ctx context.Context) (*ContractAgent, error) {
 	}
 
 	return &ContractAgent{
-		llm:            llm,
+		llm:            chatModel,
 		promptTemplate: promptTemplate,
 	}, nil
 }
@@ -123,13 +120,9 @@ func GetContractAgent() *ContractAgent {
 
 // LLMContractParse 对外提供的合同解析函数
 func LLMContractParse(ctx context.Context, content string) (string, error) {
-	agent := GetContractAgent()
-	if agent == nil {
-		// 如果未初始化，则初始化
-		if err := InitContractAgent(ctx); err != nil {
-			return "", err
-		}
-		agent = GetContractAgent()
+	agent, err := NewContractAgent(ctx)
+	if err != nil {
+		return "", err
 	}
 	return agent.ParseContract(ctx, content)
 }

@@ -1,4 +1,6 @@
 import type { NextRequest } from "next/server";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 
 export const dynamic = "force-dynamic";
 
@@ -26,10 +28,7 @@ export async function GET(
         });
 
         if (!upstream.ok) {
-            return new Response(`File not found: ${staticPath}`, {
-                status: upstream.status,
-                statusText: upstream.statusText,
-            });
+            return serveLocalUploadFallback(staticPath, upstream.status, upstream.statusText);
         }
 
         // 复制响应头
@@ -52,6 +51,52 @@ export async function GET(
         });
     } catch (error) {
         console.error("Static file proxy error:", error);
-        return new Response("Failed to fetch static file", { status: 500 });
+        return serveLocalUploadFallback(staticPath, 500, "Failed to fetch static file");
     }
+}
+
+async function serveLocalUploadFallback(
+    staticPath: string,
+    status: number,
+    statusText: string
+) {
+    const fileName = decodeURIComponent(path.basename(staticPath));
+    const candidates = [
+        path.resolve(process.cwd(), "../app/uploads", fileName),
+        path.resolve(process.cwd(), "app/uploads", fileName),
+        path.resolve(process.cwd(), "uploads", fileName),
+    ];
+
+    for (const candidate of candidates) {
+        try {
+            const file = await readFile(candidate);
+            return new Response(new Uint8Array(file), {
+                status: 200,
+                headers: {
+                    "content-type": contentTypeFor(fileName),
+                    "cache-control": "public, max-age=31536000, immutable",
+                },
+            });
+        } catch {
+        }
+    }
+
+    return new Response(`File not found: ${staticPath}`, {
+        status,
+        statusText,
+    });
+}
+
+function contentTypeFor(fileName: string) {
+    const ext = path.extname(fileName).toLowerCase();
+    if (ext === ".docx") {
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    }
+    if (ext === ".pdf") {
+        return "application/pdf";
+    }
+    if (ext === ".txt") {
+        return "text/plain; charset=utf-8";
+    }
+    return "application/octet-stream";
 }

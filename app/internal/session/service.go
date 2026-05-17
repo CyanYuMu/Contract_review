@@ -37,7 +37,7 @@ func NewSessionService(
 }
 
 // CreateSession 创建会话
-func (s *SessionService) CreateSession(ctx context.Context, userID uint64, req *CreateSessionRequest) (*Session, error) {
+func (s *SessionService) CreateSession(ctx context.Context, account string, req *CreateSessionRequest) (*Session, error) {
 	// 验证关联合同文件
 	if req.FileID > 0 {
 		contractFile, err := s.contractRepo.GetContractByID(ctx, req.FileID)
@@ -51,8 +51,15 @@ func (s *SessionService) CreateSession(ctx context.Context, userID uint64, req *
 		return nil, fmt.Errorf("无效的会话类型: %s", req.SessionType)
 	}
 
+	var userRecord struct {
+		ID uint `gorm:"column:id"`
+	}
+	if err := s.db.WithContext(ctx).Table("users").Select("id").Where("account = ?", account).First(&userRecord).Error; err != nil {
+		return nil, fmt.Errorf("获取用户信息失败: %w", err)
+	}
+
 	session := &Session{
-		UserID:      uint(userID),
+		UserID:      userRecord.ID,
 		Title:       req.Title,
 		SessionType: req.SessionType,
 		FileID:      uint(req.FileID),
