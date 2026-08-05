@@ -39,11 +39,18 @@ type MilvusVectorStoreConfig struct {
 }
 
 // MilvusVectorStore 是审阅知识库的 Milvus 向量检索实现。
+//
+// 支持两种检索路径：
+//   - Dense Vector: FloatVector + AUTOINDEX (COSINE/L2/IP) — 语义检索
+//   - BM25 Text Match: 基于 Milvus content 列的 LIKE 表达式全文检索
+//
+// 升级到 Milvus 2.5+ SDK 后可启用原生 BM25 Function (content → SparseVector)
 type MilvusVectorStore struct {
-	client     client.Client
-	collection string
-	dimension  int
-	metricType entity.MetricType
+	client      client.Client
+	collection  string
+	dimension   int
+	metricType  entity.MetricType
+	bm25Enabled bool // 全文字段检索是否可用
 }
 
 func NewMilvusVectorStore(ctx context.Context, cfg MilvusVectorStoreConfig) (*MilvusVectorStore, error) {
@@ -69,10 +76,11 @@ func NewMilvusVectorStore(ctx context.Context, cfg MilvusVectorStoreConfig) (*Mi
 	}
 
 	store := &MilvusVectorStore{
-		client:     c,
-		collection: cfg.Collection,
-		dimension:  cfg.Dimension,
-		metricType: parseMilvusMetricType(cfg.MetricType),
+		client:      c,
+		collection:  cfg.Collection,
+		dimension:   cfg.Dimension,
+		metricType:  parseMilvusMetricType(cfg.MetricType),
+		bm25Enabled: true, // 基于 LIKE 表达式的文本检索始终可用
 	}
 	if err := store.ensureCollection(ctx); err != nil {
 		c.Close()
@@ -85,6 +93,10 @@ func (s *MilvusVectorStore) Close() {
 	if s != nil && s.client != nil {
 		s.client.Close()
 	}
+}
+
+func (s *MilvusVectorStore) BM25Enabled() bool {
+	return s.bm25Enabled
 }
 
 func (s *MilvusVectorStore) Insert(chunks []Chunk) error {
@@ -186,9 +198,6 @@ func (s *MilvusVectorStore) Search(query []float32, topK int, filters map[string
 	if err != nil {
 		return nil, err
 	}
-	if len(results) == 0 {
-		return nil, nil
-	}
 
 	out := make([]SearchResult, 0, results[0].ResultCount)
 	for _, result := range results {
@@ -205,16 +214,167 @@ func (s *MilvusVectorStore) Search(query []float32, topK int, filters map[string
 				score = float64(result.Scores[i])
 			}
 			out = append(out, SearchResult{
-				ChunkID:  chunkID,
-				DocID:    columnByNameString(result.Fields, milvusFieldDocID, i),
-				Content:  content,
-				Score:    score,
-				Source:   source,
-				Metadata: metadata,
+				ChunkID:   chunkID,
+				DocID:     columnByNameString(result.Fields, milvusFieldDocID, i),
+				Content:   content,
+				Score:     score,
+				BaseScore: score,
+				Source:    source,
+				Metadata:  metadata,
 			})
 		}
 	}
 	return out, nil
+}
+
+// SearchBM25 基于 Milvus LIKE 表达式的全文检索
+//
+// 策略: 将查询分词后，用 OR 连接多个 LIKE 条件对 content 列进行文本匹配
+// 升级到 Milvus 2.5+ SDK 后可切换为原生 BM25 Function + SparseVector 搜索
+func (s *MilvusVectorStore) SearchBM25(query string, topK int, filters map[string]string) ([]SearchResult, error) {
+	if !s.bm25Enabled {
+		return nil, nil
+	}
+	if strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
+	if topK <= 0 {
+		topK = 5
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// 构建全文检索表达式
+	expr := buildBM25Expr(query)
+	if filterExpr := buildMilvusExpr(filters); filterExpr != "" {
+		if expr != "" {
+			expr = "(" + expr + ") && (" + filterExpr + ")"
+		} else {
+			expr = filterExpr
+		}
+	}
+
+	if expr == "" {
+		return nil, nil
+	}
+
+	results, err := s.client.Query(
+		ctx,
+		s.collection,
+		nil,
+		expr,
+		[]string{
+			milvusFieldChunkID,
+			milvusFieldDocID,
+			milvusFieldContent,
+			milvusFieldSource,
+			milvusFieldCategory,
+			milvusFieldSubCategory,
+			milvusFieldTitle,
+			milvusFieldMetadata,
+		},
+		client.WithLimit(int64(topK)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("BM25 全文检索失败: %w", err)
+	}
+
+	count := results.Len()
+	if count > topK {
+		count = topK
+	}
+	out := make([]SearchResult, 0, count)
+	for i := 0; i < count; i++ {
+		out = append(out, SearchResult{
+			ChunkID:   columnByNameString(results, milvusFieldChunkID, i),
+			DocID:     columnByNameString(results, milvusFieldDocID, i),
+			Content:   columnByNameString(results, milvusFieldContent, i),
+			Source:    columnByNameString(results, milvusFieldSource, i),
+			Score:     0.5, // 文本匹配固定中间分，由 RRF 融合最终排序
+			BaseScore: 0.5,
+			Metadata:  metadataFromMilvusResult(results, i),
+		})
+	}
+	return out, nil
+}
+
+// buildBM25Expr 构建全文检索 LIKE 表达式
+// 对查询进行双字 bigram 分词 + 法律关键词提取，OR 连接
+func buildBM25Expr(query string) string {
+	terms := tokenizeForBM25(query)
+	if len(terms) == 0 {
+		return ""
+	}
+
+	exprParts := make([]string, 0, len(terms))
+	for _, term := range terms {
+		term = strings.ReplaceAll(term, `"`, `\"`)
+		exprParts = append(exprParts, fmt.Sprintf(`%s like "%%%s%%"`, milvusFieldContent, term))
+	}
+
+	return strings.Join(exprParts, " || ")
+}
+
+// tokenizeForBM25 为 BM25 检索对查询分词
+func tokenizeForBM25(query string) []string {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil
+	}
+
+	terms := make([]string, 0, 16)
+	seen := make(map[string]bool)
+
+	// 1. CJK bigram
+	runes := []rune(query)
+	for i := 0; i < len(runes)-1; i++ {
+		if isCJK(runes[i]) && isCJK(runes[i+1]) {
+			bigram := string(runes[i : i+2])
+			if !seen[bigram] {
+				seen[bigram] = true
+				terms = append(terms, bigram)
+			}
+		}
+	}
+
+	// 2. 法律关键词
+	legalKeywords := []string{
+		"付款", "支付", "验收", "交付", "违约", "赔偿", "违约金", "解除", "终止",
+		"知识产权", "著作权", "专利", "商标", "保密", "管辖", "争议", "发票", "逾期",
+		"单方", "服务范围", "服务内容", "质量", "期限", "义务", "责任", "免责",
+		"合同主体", "甲乙方", "不可抗力", "变更", "转让", "仲裁", "诉讼",
+	}
+	queryLower := strings.ToLower(query)
+	for _, kw := range legalKeywords {
+		if strings.Contains(queryLower, strings.ToLower(kw)) && !seen[kw] {
+			seen[kw] = true
+			terms = append(terms, kw)
+		}
+	}
+
+	// 3. 英文单词
+	for _, word := range strings.Fields(queryLower) {
+		if len(word) >= 2 && !isAllCJK(word) && !seen[word] {
+			seen[word] = true
+			terms = append(terms, word)
+		}
+	}
+
+	// 限制数量
+	if len(terms) > 15 {
+		terms = terms[:15]
+	}
+	return terms
+}
+
+func isAllCJK(s string) bool {
+	for _, r := range s {
+		if !isCJK(r) {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 func (s *MilvusVectorStore) Delete(ids []string) error {
@@ -242,15 +402,34 @@ func (s *MilvusVectorStore) ensureCollection(ctx context.Context) error {
 			WithName(s.collection).
 			WithDescription("contract review knowledge chunks").
 			WithAutoID(false).
-			WithField(entity.NewField().WithName(milvusFieldChunkID).WithDataType(entity.FieldTypeVarChar).WithIsPrimaryKey(true).WithMaxLength(512)).
-			WithField(entity.NewField().WithName(milvusFieldDocID).WithDataType(entity.FieldTypeVarChar).WithMaxLength(512)).
-			WithField(entity.NewField().WithName(milvusFieldContent).WithDataType(entity.FieldTypeVarChar).WithMaxLength(milvusMaxContentLen)).
-			WithField(entity.NewField().WithName(milvusFieldSource).WithDataType(entity.FieldTypeVarChar).WithMaxLength(512)).
-			WithField(entity.NewField().WithName(milvusFieldCategory).WithDataType(entity.FieldTypeVarChar).WithMaxLength(128)).
-			WithField(entity.NewField().WithName(milvusFieldSubCategory).WithDataType(entity.FieldTypeVarChar).WithMaxLength(128)).
-			WithField(entity.NewField().WithName(milvusFieldTitle).WithDataType(entity.FieldTypeVarChar).WithMaxLength(512)).
-			WithField(entity.NewField().WithName(milvusFieldMetadata).WithDataType(entity.FieldTypeVarChar).WithMaxLength(milvusMaxMetadataLen)).
-			WithField(entity.NewField().WithName(milvusFieldEmbedding).WithDataType(entity.FieldTypeFloatVector).WithDim(int64(s.dimension)))
+			WithField(entity.NewField().WithName(milvusFieldChunkID).
+				WithDataType(entity.FieldTypeVarChar).
+				WithIsPrimaryKey(true).
+				WithMaxLength(512)).
+			WithField(entity.NewField().WithName(milvusFieldDocID).
+				WithDataType(entity.FieldTypeVarChar).
+				WithMaxLength(512)).
+			WithField(entity.NewField().WithName(milvusFieldContent).
+				WithDataType(entity.FieldTypeVarChar).
+				WithMaxLength(milvusMaxContentLen)).
+			WithField(entity.NewField().WithName(milvusFieldSource).
+				WithDataType(entity.FieldTypeVarChar).
+				WithMaxLength(512)).
+			WithField(entity.NewField().WithName(milvusFieldCategory).
+				WithDataType(entity.FieldTypeVarChar).
+				WithMaxLength(128)).
+			WithField(entity.NewField().WithName(milvusFieldSubCategory).
+				WithDataType(entity.FieldTypeVarChar).
+				WithMaxLength(128)).
+			WithField(entity.NewField().WithName(milvusFieldTitle).
+				WithDataType(entity.FieldTypeVarChar).
+				WithMaxLength(512)).
+			WithField(entity.NewField().WithName(milvusFieldMetadata).
+				WithDataType(entity.FieldTypeVarChar).
+				WithMaxLength(milvusMaxMetadataLen)).
+			WithField(entity.NewField().WithName(milvusFieldEmbedding).
+				WithDataType(entity.FieldTypeFloatVector).
+				WithDim(int64(s.dimension)))
 		if err := s.client.CreateCollection(ctx, schema, entity.DefaultShardNumber); err != nil {
 			return err
 		}
@@ -289,11 +468,11 @@ func buildMilvusExpr(filters map[string]string) string {
 		}
 		switch key {
 		case "category":
-			exprs = append(exprs, fmt.Sprintf("%s == \"%s\"", milvusFieldCategory, escapeMilvusString(value)))
+			exprs = append(exprs, fmt.Sprintf(`%s == "%s"`, milvusFieldCategory, escapeMilvusString(value)))
 		case "sub_category":
-			exprs = append(exprs, fmt.Sprintf("%s == \"%s\"", milvusFieldSubCategory, escapeMilvusString(value)))
+			exprs = append(exprs, fmt.Sprintf(`%s == "%s"`, milvusFieldSubCategory, escapeMilvusString(value)))
 		case "source":
-			exprs = append(exprs, fmt.Sprintf("%s == \"%s\"", milvusFieldSource, escapeMilvusString(value)))
+			exprs = append(exprs, fmt.Sprintf(`%s == "%s"`, milvusFieldSource, escapeMilvusString(value)))
 		}
 	}
 	return strings.Join(exprs, " && ")

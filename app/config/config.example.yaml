@@ -12,6 +12,7 @@ llm_config:
 
 vector:
   enabled: false
+  enable_bm25: true          # 启用 Milvus LIKE 表达式全文检索
   embedding:
     enabled: false
     api_key: "your-embedding-api-key-here"
@@ -29,6 +30,14 @@ vector:
     dimension: 1024
     metric_type: "COSINE"
     use_tls: false
+  rerank:
+    enabled: false
+    api_key: "your-rerank-api-key-here"
+    api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model: "BAAI/bge-reranker-v2-m3"
+    top_k: 5
+    threshold: 0.2
+    timeout_seconds: 10
 
 mysql:
   host: mysql-prod

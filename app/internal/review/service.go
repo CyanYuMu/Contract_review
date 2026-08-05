@@ -630,11 +630,25 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 		return s.llm.Generate(ctx, messages)
 	}
 
+	// ======== Phase 1: 检索配置优化 ========
 	keywordIndex := rag.NewSimpleKeywordIndex()
+
+	// 为合同审阅优化检索配置
 	retrieverConfig := rag.DefaultRetrieverConfig()
 	retrieverConfig.FinalTopK = 8
-	// RRF 融合后的分数天然较小，仅关键词通道不再用固定阈值过滤，避免中文命中被误删。
+	retrieverConfig.TopK = 10
+	// RRF 三路权重: 向量 0.5, BM25 0.3, 关键词 0.2
+	retrieverConfig.VectorWeight = 0.5
+	retrieverConfig.BM25Weight = 0.3
+	retrieverConfig.KeywordWeight = 0.2
+	retrieverConfig.RRFK = 30 // 较小集合用较小 K 值
 	retrieverConfig.MinRelevance = 0
+	retrieverConfig.OversampleMultiplier = 5
+	retrieverConfig.OversampleMin = 25
+	retrieverConfig.OversampleMax = 100
+	retrieverConfig.EnableBM25 = false // 由 initVectorRetrieval 自动检测
+	retrieverConfig.EnableRerank = false
+	retrieverConfig.MMRLambda = 0.7 // MMR 70% 相关性 + 30% 多样性
 
 	var knowledgeChunks []rag.Chunk
 	if global.DB != nil {
@@ -644,7 +658,7 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 		} else if len(chunks) > 0 {
 			knowledgeChunks = chunks
 			if err := keywordIndex.Index(chunks); err != nil {
-				global.Log.Warn("审阅知识库入索引失败", zap.Error(err))
+				global.Log.Warn("审阅知识库入关键词索引失败", zap.Error(err))
 			} else {
 				global.Log.Info("审阅知识库已加载到关键词索引", zap.Int("chunks", len(chunks)))
 			}
@@ -657,14 +671,35 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 	if len(keywordIndex.SearchableChunks()) == 0 {
 		knowledgeChunks = defaultReviewKnowledgeChunks()
 		if err := keywordIndex.Index(knowledgeChunks); err != nil {
-			global.Log.Warn("内置审阅知识入索引失败", zap.Error(err))
+			global.Log.Warn("内置审阅知识入关键词索引失败", zap.Error(err))
 		} else {
 			global.Log.Warn("使用内置审阅知识兜底；建议执行 docs/sql/review_knowledge.sql 写入数据库知识库")
 		}
 	}
 
+	// ======== Phase 1: 向量检索 + BM25 初始化 ========
 	vectorStore, embedder := s.initVectorRetrieval(ctx, knowledgeChunks)
-	ragRetriever := rag.NewRAGRetriever(vectorStore, keywordIndex, embedder, retrieverConfig)
+
+	// ======== Phase 1: Reranker 初始化 ========
+	var retrieverOpts []rag.RAGRetrieverOption
+	if global.Config != nil && global.Config.Vector != nil &&
+		global.Config.Vector.Rerank != nil && global.Config.Vector.Rerank.Enabled {
+		rerankCfg := s.buildRerankerConfig()
+		reranker := rag.NewOpenAIReranker(rerankCfg)
+		retrieverOpts = append(retrieverOpts, rag.WithReranker(reranker, rerankCfg))
+		retrieverConfig.EnableRerank = true
+		global.Log.Info("Reranker 已启用",
+			zap.String("model", rerankCfg.Model),
+			zap.Float64("threshold", rerankCfg.Threshold))
+	}
+
+	ragRetriever := rag.NewRAGRetriever(vectorStore, keywordIndex, embedder, retrieverConfig, retrieverOpts...)
+
+	// ======== Phase 1: Embedding 缓存命中率日志 ========
+	if cachedEmbedder, ok := embedder.(*rag.CachedEmbedder); ok {
+		global.Log.Info("Embedding 缓存已启用，审阅中相同条款内容将跳过重复计算")
+		_ = cachedEmbedder
+	}
 
 	ragSearchTool := tools.NewRAGSearchTool(ragRetriever)
 	contractContextTool := tools.NewContractContextTool(agent.ContractMeta{}, "")
@@ -672,10 +707,46 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 	suggestionTools := []agent.Tool{ragSearchTool, contractContextTool}
 
 	orchConfig := agent.DefaultOrchestratorConfig()
+	// Phase 1 优化: 启用 Reflection 重试以确保质量
+	orchConfig.MaxReflectionRetries = 1
+	orchConfig.ReflectionThreshold = 0.6
+
 	s.orchestrator = agent.NewReviewOrchestrator(llmGenerate, ragRetriever, suggestionTools, orchConfig)
 
-	global.Log.Info("Agent 编排器初始化完成")
+	global.Log.Info("Agent 编排器初始化完成",
+		zap.Bool("vector_enabled", vectorStore != nil),
+		zap.Bool("bm25_enabled", retrieverConfig.EnableBM25),
+		zap.Bool("rerank_enabled", retrieverConfig.EnableRerank),
+		zap.Int("keyword_chunks", len(keywordIndex.SearchableChunks())))
 	return nil
+}
+
+// buildRerankerConfig 从全局配置构建 RerankerConfig
+func (s *ReviewService) buildRerankerConfig() rag.RerankerConfig {
+	cfg := rag.DefaultRerankerConfig()
+	if global.Config == nil || global.Config.Vector == nil || global.Config.Vector.Rerank == nil {
+		return cfg
+	}
+	rc := global.Config.Vector.Rerank
+	if rc.Model != "" {
+		cfg.Model = rc.Model
+	}
+	if rc.APIBase != "" {
+		cfg.APIBase = rc.APIBase
+	}
+	if rc.APIKey != "" {
+		cfg.APIKey = rc.APIKey
+	}
+	if rc.TopK > 0 {
+		cfg.TopK = rc.TopK
+	}
+	if rc.Threshold > 0 {
+		cfg.Threshold = rc.Threshold
+	}
+	if rc.TimeoutSeconds > 0 {
+		cfg.TimeoutSeconds = rc.TimeoutSeconds
+	}
+	return cfg
 }
 
 func (s *ReviewService) initVectorRetrieval(ctx context.Context, chunks []rag.Chunk) (rag.VectorStore, rag.EmbeddingModel) {
@@ -705,12 +776,14 @@ func (s *ReviewService) initVectorRetrieval(ctx context.Context, chunks []rag.Ch
 		global.Log.Warn("向量检索已开启，但 embedding model/api_url 未配置，跳过 Milvus 向量检索")
 		return nil, nil
 	}
-	embedder := rag.NewOpenAIEmbeddingModel(
+	rawEmbedder := rag.NewOpenAIEmbeddingModel(
 		vectorCfg.Embedding.Model,
 		embeddingAPIBase,
 		embeddingAPIKey,
 		timeout,
 	)
+	// Phase 1: CachedEmbedder - 同一 session 内相同文本不重复计算 embedding
+	embedder := rag.NewCachedEmbedder(rawEmbedder, rag.NewEmbeddingCache())
 	dimension := vectorCfg.Milvus.Dimension
 	if dimension <= 0 {
 		dimension = vectorCfg.Embedding.Dimension
@@ -731,12 +804,12 @@ func (s *ReviewService) initVectorRetrieval(ctx context.Context, chunks []rag.Ch
 	s.vectorComponentMu.Lock()
 	if s.vectorStore != nil && s.vectorEmbedder != nil && s.vectorConfigKey == configKey {
 		store := s.vectorStore
-		embedder := s.vectorEmbedder
+		cachedEmbedder := rag.NewCachedEmbedder(s.vectorEmbedder, rag.NewEmbeddingCache())
 		s.vectorComponentMu.Unlock()
-		if err := s.indexKnowledgeChunksToVectorStore(ctx, chunks, store, embedder, dimension); err != nil {
+		if err := s.indexKnowledgeChunksToVectorStore(ctx, chunks, store, cachedEmbedder, dimension); err != nil {
 			global.Log.Warn("同步审阅知识到 Milvus 失败，本次审阅仍使用关键词检索兜底", zap.Error(err))
 		}
-		return store, embedder
+		return store, cachedEmbedder
 	}
 
 	store, err := rag.NewMilvusVectorStore(ctx, rag.MilvusVectorStoreConfig{
@@ -759,7 +832,7 @@ func (s *ReviewService) initVectorRetrieval(ctx context.Context, chunks []rag.Ch
 		closer.Close()
 	}
 	s.vectorStore = store
-	s.vectorEmbedder = embedder
+	s.vectorEmbedder = rawEmbedder
 	s.vectorConfigKey = configKey
 	s.vectorIndexHashes = make(map[string]string)
 	s.vectorComponentMu.Unlock()

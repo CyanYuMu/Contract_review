@@ -41,10 +41,22 @@ type MilvusConfig struct {
 	UseTLS     bool   `mapstructure:"use_tls"`
 }
 
+type RerankConfig struct {
+	Enabled        bool    `mapstructure:"enabled"`
+	APIKey         string  `mapstructure:"api_key"`
+	APIBase        string  `mapstructure:"api_url"`
+	Model          string  `mapstructure:"model"`
+	TopK           int     `mapstructure:"top_k"`
+	Threshold      float64 `mapstructure:"threshold"`
+	TimeoutSeconds int     `mapstructure:"timeout_seconds"`
+}
+
 type VectorConfig struct {
-	Enabled   bool             `mapstructure:"enabled"`
-	Embedding *EmbeddingConfig `mapstructure:"embedding"`
-	Milvus    *MilvusConfig    `mapstructure:"milvus"`
+	Enabled    bool             `mapstructure:"enabled"`
+	Embedding  *EmbeddingConfig `mapstructure:"embedding"`
+	Milvus     *MilvusConfig    `mapstructure:"milvus"`
+	Rerank     *RerankConfig    `mapstructure:"rerank"`
+	EnableBM25 bool             `mapstructure:"enable_bm25"`
 }
 
 type OSS struct {
