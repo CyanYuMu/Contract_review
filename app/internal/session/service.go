@@ -36,6 +36,22 @@ func NewSessionService(
 	}
 }
 
+// ResolveUserID 按账号查数字用户 ID。
+// 注意：鉴权中间件 GetCurrentUserID 返回的是 account 字符串（如 "debugtest"），
+// 不能直接 ParseUint（会得到 0），必须查 users 表解析为数字 ID。
+func (s *SessionService) ResolveUserID(ctx context.Context, account string) (uint64, error) {
+	if account == "" {
+		return 0, fmt.Errorf("未登录")
+	}
+	var userRecord struct {
+		ID uint `gorm:"column:id"`
+	}
+	if err := s.db.WithContext(ctx).Table("users").Select("id").Where("account = ?", account).First(&userRecord).Error; err != nil {
+		return 0, fmt.Errorf("用户不存在: %w", err)
+	}
+	return uint64(userRecord.ID), nil
+}
+
 // CreateSession 创建会话
 func (s *SessionService) CreateSession(ctx context.Context, account string, req *CreateSessionRequest) (*Session, error) {
 	// 验证关联合同文件
@@ -86,9 +102,30 @@ func (s *SessionService) ListSessions(ctx context.Context, userID uint64, req *L
 		return s.listReviewSessions(ctx, userID, offset, req.PageSize)
 	case SessionTypeCompare, SessionTypeCompareLegacy:
 		return s.listCompareSessions(ctx, userID, offset, req.PageSize)
+	case SessionTypeChat:
+		return s.listChatSessions(ctx, userID, offset, req.PageSize)
 	default:
 		return nil, 0, fmt.Errorf("无效的会话类型: %s", req.SessionType)
 	}
+}
+
+// listChatSessions 获取问答类型会话列表（仅基础信息，前端问答侧栏使用）
+func (s *SessionService) listChatSessions(ctx context.Context, userID uint64, offset, limit int) ([]SessionResponse, int64, error) {
+	sessions, total, err := s.sessionRepo.ListByUserIDAndType(ctx, uint(userID), SessionTypeChat, offset, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	response := make([]SessionResponse, 0, len(sessions))
+	for _, sess := range sessions {
+		response = append(response, SessionResponse{
+			SessionID:   uint64(sess.ID),
+			Title:       sess.Title,
+			SessionType: sess.SessionType,
+			FileID:      uint64(sess.FileID),
+			CreatedAt:   sess.CreatedAt.Format("2006-01-02 15:04:05"),
+		})
+	}
+	return response, total, nil
 }
 
 // listReviewSessions 获取审阅类型会话列表

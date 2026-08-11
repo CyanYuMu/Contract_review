@@ -7,14 +7,14 @@ import type {User} from "@/lib/Interface";
 import {assets} from "@/assets/assets";
 import {useRouter} from "next/navigation";
 
-export type TabType = 'check' | 'contrast' | 'history' | 'databoard';
+export type TabType = 'check' | 'qa' | 'contrast' | 'history';
 
 // Tab 对应的路由路径
 const tabRoutes: Record<TabType, string> = {
     check: '/',
+    qa: '/qa',
     contrast: '/contrast',
     history: '/history',
-    databoard: '/databoard',
 };
 
 type TopbarTabsProps = {
@@ -68,9 +68,9 @@ export default function TopbarTabs({
 
     const tabs = [
         {key: 'check' as TabType, label: '合同审阅'},
+        {key: 'qa' as TabType, label: '合同问答'},
         {key: 'contrast' as TabType, label: '合同比对'},
         {key: 'history' as TabType, label: '智审记录'},
-        {key: 'databoard' as TabType, label: '数据看板'},
     ];
 
     const popoverContent = (

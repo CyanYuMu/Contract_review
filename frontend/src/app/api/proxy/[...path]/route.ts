@@ -16,7 +16,7 @@ export async function POST(
     // SSE直通：当客户端声明接收SSE或特定流式路径时，走流式转发
     const accept = request.headers.get('accept') || '';
     const joinedPath = path.join('/');
-    if (accept.includes('text/event-stream') || joinedPath === 'chat' || joinedPath === 'chat/chat' || joinedPath === 'review_task/start_task') {
+    if (accept.includes('text/event-stream') || joinedPath === 'chat' || joinedPath === 'chat/chat' || joinedPath === 'review_task/start_task' || joinedPath === 'qa/ask') {
         return handleChatStreamRequest(request, path);
     }
     return handleRequest(request, path, 'POST');

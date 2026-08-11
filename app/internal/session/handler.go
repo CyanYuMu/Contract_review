@@ -83,7 +83,11 @@ func (h *SessionHandler) ListSessions(ctx context.Context, c *app.RequestContext
 		c.JSON(401, response.Unauthorized())
 		return
 	}
-	userID, _ := strconv.ParseUint(userIDStr, 10, 64)
+	userID, err := h.sessionService.ResolveUserID(ctx, userIDStr)
+	if err != nil {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
 
 	// 2. 绑定请求参数
 	var req ListSessionsRequest
@@ -129,7 +133,11 @@ func (h *SessionHandler) UpdateSessionTitle(ctx context.Context, c *app.RequestC
 		c.JSON(401, response.Unauthorized())
 		return
 	}
-	userID, _ := strconv.ParseUint(userIDStr, 10, 64)
+	userID, err := h.sessionService.ResolveUserID(ctx, userIDStr)
+	if err != nil {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
 
 	// 2. 绑定请求参数
 	var req UpdateSessionTitleRequest
@@ -172,7 +180,11 @@ func (h *SessionHandler) DeleteSession(ctx context.Context, c *app.RequestContex
 		c.JSON(401, response.Unauthorized())
 		return
 	}
-	userID, _ := strconv.ParseUint(userIDStr, 10, 64)
+	userID, err := h.sessionService.ResolveUserID(ctx, userIDStr)
+	if err != nil {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
 
 	// 2. 绑定请求参数
 	var req DeleteSessionRequest

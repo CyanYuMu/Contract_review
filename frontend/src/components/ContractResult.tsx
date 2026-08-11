@@ -1462,9 +1462,9 @@ export default function ContractResult() {
   // Tab 对应的路由路径
   const tabRoutes: Record<TabType, string> = {
     check: '/',
+    qa: '/qa',
     contrast: '/contrast',
     history: '/history',
-    databoard: '/databoard',
   };
 
   // 处理标签页切换
