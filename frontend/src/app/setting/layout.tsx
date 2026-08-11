@@ -131,6 +131,15 @@ const ContractTypeIcon = ({ active }: { active: boolean }) => (
 </svg>
 )
 
+const CostIcon = ({ active }: { active: boolean }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="19.5" height="19.5" viewBox="0 0 19.5 19.5" fill="none">
+        <path d="M2 17.25H17.75" stroke={active ? '#2260F2' : '#383838'} strokeWidth="1.5" strokeLinecap="round"/>
+        <rect x="3.5" y="10" width="3" height="5.5" stroke={active ? '#2260F2' : '#383838'} strokeWidth="1.5" strokeLinejoin="round"/>
+        <rect x="8.25" y="6" width="3" height="9.5" stroke={active ? '#2260F2' : '#383838'} strokeWidth="1.5" strokeLinejoin="round"/>
+        <rect x="13" y="2.5" width="3" height="13" stroke={active ? '#2260F2' : '#383838'} strokeWidth="1.5" strokeLinejoin="round"/>
+    </svg>
+);
+
 export default function SettingLayout({
     children,
 }: {
@@ -146,11 +155,9 @@ export default function SettingLayout({
 
     const getSelectedKey = () => {
         if (pathname.includes('/setting/model')) return 'model';
+        if (pathname.includes('/setting/cost')) return 'cost';
         if (pathname.includes('/setting/contractType')) return 'contractType';
         if (pathname.includes('/setting/risk')) return 'risk';
-        if (pathname.includes('/setting/permission')) return 'permission';
-        if (pathname.includes('/setting/role')) return 'role';
-        if (pathname.includes('/setting/feedback')) return 'feedback';
         if (pathname.includes('/setting/about')) return 'about';
         return 'model';
     };
@@ -242,6 +249,17 @@ const menuItems = [
         }
     },
     {
+        key: 'cost',
+        icon: <CostIcon active={activeKey === 'cost'} />,
+        label: <span style={{ marginLeft: '1rem' }}>成本看板</span>,
+        onClick: () => handleMenuClick('cost', '/setting/cost'),
+        className: '!h-[3rem] !leading-[3rem] !text-[0.95rem] !mt-0 !mb-[0.75rem] !rounded-none transition-all duration-200',
+        style: {
+            paddingLeft: '1.5rem',
+            color: activeKey === 'cost' ? '#2260F2' : '#383838'
+        }
+    },
+    {
         key: 'contractType',
         icon: <ContractTypeIcon active={activeKey === 'contractType'} />,
         label: <span style={{ marginLeft: '1rem' }}>合同类型配置</span>,
@@ -261,39 +279,6 @@ const menuItems = [
         style: {
             paddingLeft: '1.5rem',
             color: activeKey === 'risk' ? '#2260F2' : '#383838'
-        }
-    },
-    {
-        key: 'permission',
-        icon: <PermissionIcon active={activeKey === 'permission'} />,
-        label: <span style={{ marginLeft: '1rem' }}>权限列表</span>,
-        onClick: () => handleMenuClick('permission', '/setting/permission'),
-        className: '!h-[3rem] !leading-[3rem] !text-[0.95rem] !mt-0 !mb-[0.75rem] !rounded-none transition-all duration-200',
-        style: {
-            paddingLeft: '1.5rem',
-            color: activeKey === 'permission' ? '#2260F2' : '#383838'
-        }
-    },
-    {
-        key: 'role',
-        icon: <RoleIcon active={activeKey === 'role'} />,
-        label: <span style={{ marginLeft: '1rem' }}>角色配置</span>,
-        onClick: () => handleMenuClick('role', '/setting/role'),
-        className: '!h-[3rem] !leading-[3rem] !text-[0.95rem] !mt-0 !mb-[0.75rem] !rounded-none transition-all duration-200',
-        style: {
-            paddingLeft: '1.5rem',
-            color: activeKey === 'role' ? '#2260F2' : '#383838'
-        }
-    },
-    {
-        key: 'feedback',
-        icon: <FeedbackIcon active={activeKey === 'feedback'} />,
-        label: <span style={{ marginLeft: '1rem' }}>意见反馈</span>,
-        onClick: () => handleMenuClick('feedback', '/setting/feedback'),
-        className: '!h-[3rem] !leading-[3rem] !text-[0.95rem] !mt-0 !mb-[0.75rem] !rounded-none transition-all duration-200',
-        style: {
-            paddingLeft: '1.5rem',
-            color: activeKey === 'feedback' ? '#2260F2' : '#383838'
         }
     },
     {

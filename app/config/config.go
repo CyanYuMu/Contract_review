@@ -59,6 +59,19 @@ type VectorConfig struct {
 	EnableBM25 bool             `mapstructure:"enable_bm25"`
 }
 
+// GatewayConfig 大模型网关配置
+type GatewayConfig struct {
+	EnableRateLimit bool    `mapstructure:"enable_rate_limit"`
+	RateLimitPerMin  int     `mapstructure:"rate_limit_per_min"`
+	EnableQuota      bool    `mapstructure:"enable_quota"`
+	EnableCostLog    bool    `mapstructure:"enable_cost_log"`
+	EnableCache      bool    `mapstructure:"enable_cache"`
+	CacheThreshold   float64 `mapstructure:"cache_threshold"`
+	CacheTTLSeconds  int     `mapstructure:"cache_ttl_seconds"`
+	CacheMaxEntries  int     `mapstructure:"cache_max_entries"`
+	RequestTimeoutS  int     `mapstructure:"request_timeout_s"`
+}
+
 type OSS struct {
 	Endpoint   string `mapstructure:"endpoint"`
 	AccessKey  string `mapstructure:"access_key"`
@@ -104,14 +117,15 @@ type CASConfig struct {
 }
 
 type Config struct {
-	Server    *Server       `mapstructure:"server"`
-	LLMConfig *LLMConfig    `mapstructure:"llm_config"`
-	Mysql     *Mysql        `mapstructure:"mysql"`
-	Redis     *Redis        `mapstructure:"redis"`
-	CasConfig *CASConfig    `mapstructure:"cas_config"`
-	JWT       *JWTConfig    `mapstructure:"jwt"`
-	OSS       *OSS          `mapstructure:"oss"`
-	Vector    *VectorConfig `mapstructure:"vector"`
+	Server    *Server        `mapstructure:"server"`
+	LLMConfig *LLMConfig     `mapstructure:"llm_config"`
+	Mysql     *Mysql         `mapstructure:"mysql"`
+	Redis     *Redis         `mapstructure:"redis"`
+	CasConfig *CASConfig     `mapstructure:"cas_config"`
+	JWT       *JWTConfig     `mapstructure:"jwt"`
+	OSS       *OSS           `mapstructure:"oss"`
+	Vector    *VectorConfig  `mapstructure:"vector"`
+	Gateway   *GatewayConfig `mapstructure:"gateway"`
 }
 
 var (

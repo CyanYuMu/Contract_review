@@ -284,3 +284,79 @@ export interface ListSessionResponse {
     file_id: number;
     created_at: string;
 }
+
+// ============ 合同问答 QA ============
+export interface QAMessage {
+    id: number;
+    session_id: number;
+    role: "user" | "assistant";
+    content: string;
+    tokens: number;
+    created_at: string;
+}
+
+export interface QAAskRequest {
+    session_id: number;
+    message: string;
+}
+
+export interface QAAskEndData {
+    message_id: number;
+    tokens: number;
+    cache_hit: boolean;
+}
+
+export interface QAAskCallbacks {
+    onDelta?: (delta: string) => void;
+    onEnd?: (data: QAAskEndData) => void;
+    onError?: (error: Error) => void;
+}
+
+// 合同列表项（新建问答时绑定合同用；Contract 结构无 json tag，字段为大写）
+export interface ContractListItem {
+    ID: number;
+    Title: string;
+    FilePath: string;
+    FileType: string;
+    PartyA: string;
+    PartyB: string;
+    Amount: number;
+    ContractType?: { id: number; name: string } | null;
+}
+
+// ============ 大模型网关 成本 / 路由 / 配额 ============
+export interface UsageStat {
+    feature: string;
+    model_name: string;
+    call_count: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    cost: number;
+    cache_hit_count: number;
+}
+
+export interface DailyUsageTrend {
+    date: string;
+    total_tokens: number;
+    cost: number;
+    call_count: number;
+}
+
+export interface GatewayRoute {
+    feature: string;
+    model_config_id: number;
+    model_name: string;
+    params: string;
+    updated_at: string;
+}
+
+export interface LLMQuota {
+    id?: number;
+    subject_type: string;
+    subject_id: number;
+    feature?: string;
+    daily_token_limit: number;
+    monthly_token_limit: number;
+    updated_at?: string;
+}

@@ -4,17 +4,21 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"contract_review/app/config"
 	"contract_review/app/internal/Initialize"
 	"contract_review/app/internal/comparison"
 	"contract_review/app/internal/contract"
+	"contract_review/app/internal/gateway"
 	"contract_review/app/internal/global"
 	"contract_review/app/internal/knowledge"
 	"contract_review/app/internal/middleware/jwt_auth"
 	"contract_review/app/internal/middleware/redis"
 	"contract_review/app/internal/modelconfig"
 	"contract_review/app/internal/prompts"
+	"contract_review/app/internal/qa"
+	"contract_review/app/internal/rag"
 	"contract_review/app/internal/review"
 	"contract_review/app/internal/riskconfig"
 	"contract_review/app/internal/session"
@@ -67,11 +71,15 @@ func main() {
 		&prompts.InstitutionPrompt{},
 		&prompts.PersonalPrompt{},
 		&modelconfig.ModelConfig{},
+		&qa.QAMessage{},
 	); err != nil {
 		global.Log.Fatal("AutoMigrate失败", zap.Error(err))
 	}
 	if err := knowledge.AutoMigrate(db); err != nil {
 		global.Log.Fatal("知识库表迁移失败", zap.Error(err))
+	}
+	if err := gateway.AutoMigrate(db); err != nil {
+		global.Log.Fatal("网关表迁移失败", zap.Error(err))
 	}
 
 	// 5. 初始化 Redis
@@ -90,6 +98,60 @@ func main() {
 		global.Log.Fatal("初始化LLM失败", zap.Error(err))
 	}
 	global.LLM = llm
+
+	// 6.1 初始化大模型网关（统一入口 + 限流/配额/成本/语义缓存）
+	gwCfg := gateway.DefaultConfig()
+	if global.Config.Gateway != nil {
+		gc := global.Config.Gateway
+		gwCfg.EnableRateLimit = gc.EnableRateLimit
+		if gc.RateLimitPerMin > 0 {
+			gwCfg.RateLimitPerMin = gc.RateLimitPerMin
+		}
+		gwCfg.EnableQuota = gc.EnableQuota
+		gwCfg.EnableCostLog = gc.EnableCostLog
+		gwCfg.EnableCache = gc.EnableCache
+		if gc.CacheThreshold > 0 {
+			gwCfg.CacheThreshold = gc.CacheThreshold
+		}
+		if gc.CacheTTLSeconds > 0 {
+			gwCfg.CacheTTL = time.Duration(gc.CacheTTLSeconds) * time.Second
+		}
+		if gc.CacheMaxEntries > 0 {
+			gwCfg.CacheMaxEntries = gc.CacheMaxEntries
+		}
+		if gc.RequestTimeoutS > 0 {
+			gwCfg.RequestTimeoutS = gc.RequestTimeoutS
+		}
+	}
+	// 构建语义缓存所需的 embedder（复用向量检索的 embedding 配置；未配置则缓存自动关闭）
+	var gwEmbedder gateway.Embedder
+	if global.Config.Vector != nil && global.Config.Vector.Embedding != nil && global.Config.Vector.Embedding.Enabled {
+		embCfg := global.Config.Vector.Embedding
+		embBase := embCfg.APIBase
+		embKey := embCfg.APIKey
+		if embBase == "" && global.Config.LLMConfig != nil {
+			embBase = global.Config.LLMConfig.APIBase
+		}
+		if embKey == "" && global.Config.LLMConfig != nil {
+			embKey = global.Config.LLMConfig.APIKey
+		}
+		if embCfg.Model != "" && embBase != "" {
+			rawEmbedder := rag.NewOpenAIEmbeddingModel(embCfg.Model, embBase, embKey, time.Duration(embCfg.TimeoutSeconds)*time.Second)
+			gwEmbedder = rag.NewCachedEmbedder(rawEmbedder, rag.NewEmbeddingCache())
+			if gwCfg.EnableCache {
+				global.Log.Info("网关语义缓存已启用", zap.Float64("threshold", gwCfg.CacheThreshold))
+			}
+		}
+	}
+	global.Gateway = gateway.NewGateway(db, global.Redis, gwEmbedder, gwCfg)
+	if err := global.Gateway.EnsureDefaultRoutes(ctx); err != nil {
+		global.Log.Warn("初始化网关默认路由失败", zap.Error(err))
+	}
+	global.Log.Info("大模型网关初始化完成",
+		zap.Bool("rate_limit", gwCfg.EnableRateLimit),
+		zap.Bool("quota", gwCfg.EnableQuota),
+		zap.Bool("cost_log", gwCfg.EnableCostLog),
+		zap.Bool("cache", gwCfg.EnableCache && gwEmbedder != nil))
 
 	// 7. 初始化合同解析智能体
 	if err := Initialize.InitContractAgent(ctx); err != nil {
@@ -114,6 +176,8 @@ func main() {
 	riskPointService := riskconfig.NewService(riskPointRepo, db)
 	comparisonService := comparison.NewComparisonService(comparisonRepo, contractRepo, db, global.Redis)
 
+	qaService := qa.NewQAService(db, contractService)
+
 	// 创建 handlers
 	userHandler := user.NewUserHandler(userService)
 	sessionHandler := session.NewSessionHandler(sessionService)
@@ -122,6 +186,8 @@ func main() {
 	riskPointHandler := riskconfig.NewHandler(riskPointService)
 	comparisonHandler := comparison.NewComparisonHandler(comparisonService)
 	modelConfigHandler := modelconfig.NewHandler(modelConfigService)
+	gatewayHandler := gateway.NewHandler(global.Gateway)
+	qaHandler := qa.NewQAHandler(qaService)
 
 	// 9. 创建 Hertz 服务器并注册路由
 	addr := fmt.Sprintf("%s:%d", global.Config.Server.Host, global.Config.Server.Port)
@@ -224,19 +290,22 @@ func main() {
 	api.POST("/model_configs/create_model", authMW, modelConfigHandler.Create)
 	api.PUT("/model_configs/update_model/:id", authMW, modelConfigHandler.Update)
 
+	// ============ Gateway 路由（成本看板 / 路由配置 / 配额） ============
+	api.GET("/gateway/usage_stats", authMW, gatewayHandler.UsageStats)
+	api.GET("/gateway/usage_trend", authMW, gatewayHandler.UsageTrend)
+	api.GET("/gateway/routes", authMW, gatewayHandler.ListRoutes)
+	api.PUT("/gateway/route", authMW, gatewayHandler.UpdateRoute)
+	api.GET("/gateway/quotas", authMW, gatewayHandler.ListQuotas)
+	api.PUT("/gateway/quota", authMW, gatewayHandler.SetQuota)
+
 	api.GET("/prompt_manage/org/", stubJSON(map[string]interface{}{
 		"prompt_text": "",
 	}))
 
-	api.POST("/chat", func(ctx context.Context, c *app.RequestContext) {
-		c.JSON(http.StatusOK, map[string]interface{}{
-			"code": 200,
-			"msg":  "Success",
-			"data": map[string]interface{}{
-				"reply": "聊天功能暂未开放",
-			},
-		})
-	})
+	// ============ 合同问答 路由（SSE 流式 + 多轮 + 绑定合同） ============
+	api.POST("/qa/ask", authMW, qaHandler.Ask)
+	api.GET("/qa/messages", authMW, qaHandler.GetMessages)
+	api.POST("/qa/clear", authMW, qaHandler.ClearMessages)
 
 	// 10. 启动服务
 	global.Log.Info("服务启动", zap.String("addr", addr))

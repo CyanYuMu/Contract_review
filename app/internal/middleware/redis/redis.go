@@ -141,3 +141,11 @@ func (c *RedisClient) SetBytes(ctx context.Context, key string, value []byte, tt
 func (c *RedisClient) Del(ctx context.Context, key string) error {
 	return c.rdb.Del(ctx, key).Err()
 }
+
+// Client 返回底层 go-redis 客户端，供需要原生命令（INCR/Lua/HGETALL 等）的模块使用。
+func (c *RedisClient) Client() *redis.Client {
+	if c == nil {
+		return nil
+	}
+	return c.rdb
+}
