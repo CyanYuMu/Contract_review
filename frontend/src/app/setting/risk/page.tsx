@@ -1,6 +1,5 @@
 'use client';
 
-import '@ant-design/v5-patch-for-react-19';
 import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { Button, DatePicker, Input, Modal, Select, Space, Table, Tag, message } from 'antd';
 import type { TableColumnsType } from 'antd';

@@ -16,9 +16,9 @@ export const upload = async (data: FormData, onProgress?: (progress: number) => 
         });
         return response.data;
     } catch (error) {
-        const axiosErr = error as AxiosError<{ message?: string }>; 
+        const axiosErr = error as AxiosError<{ message?: string; msg?: string }>;
         if (axiosErr.response) {
-            const message = axiosErr.response.data?.message || `上传失败,请登录（${axiosErr.response.status}）`;
+            const message = axiosErr.response.data?.msg || axiosErr.response.data?.message || `上传失败（${axiosErr.response.status}）`;
             throw new Error(message);
         } else if (axiosErr.request) {
             throw new Error('网络连接失败，请检查网络');
@@ -34,9 +34,9 @@ export const save = async (data: FormData) => {
         const response = await client.post('/contract/save_file', data);
         return response.data;
     } catch (error) {
-        const axiosErr = error as AxiosError<{ message?: string }>;
+        const axiosErr = error as AxiosError<{ message?: string; msg?: string }>;
         if (axiosErr.response) {
-            const message = axiosErr.response.data?.message || `上传失败,请登录（${axiosErr.response.status}）`;
+            const message = axiosErr.response.data?.msg || axiosErr.response.data?.message || `上传失败（${axiosErr.response.status}）`;
             throw new Error(message);
         } else if (axiosErr.request) {
             throw new Error('网络连接失败，请检查网络');
@@ -45,5 +45,3 @@ export const save = async (data: FormData) => {
         }
     }
 };
-
-
