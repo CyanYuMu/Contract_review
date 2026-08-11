@@ -16,7 +16,6 @@ import Topbar from "@/components/Topbar";
 import EditorToolbar from "@/components/editor/EditorToolbar";
 import {UploadStore, type UploadData} from "@/store/uploadStore";
 import {RiskStore} from "@/store/riskStore";
-import Signboard from "@/components/signboard/Signboard";
 import ReviewHistory from "@/components/list/ReviewHistory";
 import ContrastHistory from "@/components/list/ContrastHistory";
 import type {TabType} from "@/components/TopbarTabs";
@@ -30,6 +29,7 @@ import {resolveFileUrl} from "@/utils/url";
 import ContractContrastPanel from "@/components/contrast/ContractContrastPanel";
 import {authDatedHandler} from "@/utils/authDatedHandler";
 import { buildStaticFileUrl } from '@/utils/url';
+import {waitFor} from "@/utils/waitFor";
 
 function readStoredReviewUploadData(): UploadData | null {
     if (typeof window === "undefined") return null;
@@ -239,12 +239,7 @@ export default function ReviewPageContent() {
                 }
 
                 // 等待 DOM 容器准备好（在解析完成后再次检查）
-                let retryCount = 0;
-                const maxRetries = 20; // 增加重试次数
-                while (!canvasContainerRef.current && retryCount < maxRetries) {
-                    await new Promise((resolve) => setTimeout(resolve, 100));
-                    retryCount++;
-                }
+                await waitFor(() => canvasContainerRef.current, { timeout: 2000, interval: 100 });
 
                 if (!canvasContainerRef.current) {
                     throw new Error("编辑器容器未准备好");
@@ -322,15 +317,10 @@ export default function ReviewPageContent() {
                             canvasEditorRef.current.use(markdownPlugin);
                             canvasEditorRef.current.use(docxPlugin);
 
-                            let retryCount = 0;
-                            const maxRetries = 50;
-                            while (
-                                !canvasEditorRef.current.command.executeImportDocx &&
-                                retryCount < maxRetries
-                                ) {
-                                await new Promise((resolve) => setTimeout(resolve, 50));
-                                retryCount++;
-                            }
+                            await waitFor(
+                                () => !!canvasEditorRef.current?.command?.executeImportDocx,
+                                { timeout: 2500, interval: 50 }
+                            );
 
                             if (canvasEditorRef.current.command.executeImportDocx) {
                                 await canvasEditorRef.current.command.executeImportDocx({
@@ -492,15 +482,10 @@ export default function ReviewPageContent() {
         }
 
         // 等待 executeExportDocx 方法加载
-        let retryCount = 0;
-        const maxRetries = 100;
-        while (
-            !canvasEditorRef.current.command.executeExportDocx &&
-            retryCount < maxRetries
-            ) {
-            await new Promise((resolve) => setTimeout(resolve, 50));
-            retryCount++;
-        }
+        await waitFor(
+            () => !!canvasEditorRef.current?.command?.executeExportDocx,
+            { timeout: 5000, interval: 50 }
+        );
 
         if (!canvasEditorRef.current.command.executeExportDocx) {
             // 尝试手动加载 docx 插件
@@ -512,14 +497,10 @@ export default function ReviewPageContent() {
                 canvasEditorRef.current.use(docxPlugin);
 
                 // 再次等待
-                retryCount = 0;
-                while (
-                    !canvasEditorRef.current.command.executeExportDocx &&
-                    retryCount < maxRetries
-                    ) {
-                    await new Promise((resolve) => setTimeout(resolve, 50));
-                    retryCount++;
-                }
+                await waitFor(
+                    () => !!canvasEditorRef.current?.command?.executeExportDocx,
+                    { timeout: 5000, interval: 50 }
+                );
 
                 if (!canvasEditorRef.current.command.executeExportDocx) {
                     return;
@@ -585,11 +566,7 @@ export default function ReviewPageContent() {
                 className="flex flex-row flex-1"
                 style={{paddingRight: activeTab === 'check' ? "35.13rem" : 0, overflow: "hidden"}}
             >
-                {activeTab === 'databoard' ? (
-                    <div className="flex-1 w-full overflow-auto">
-                        <Signboard/>
-                    </div>
-                ) : activeTab === 'history' ? (
+                {activeTab === 'history' ? (
                     <div className="flex-1 w-full overflow-auto bg-[#f3f4f6]">
                         <div className="h-full rounded-[0.31rem] border border-[#e3e3e3] shadow-sm p-6 overflow-auto">
                             {historyType === "review" ? (
@@ -647,7 +624,9 @@ export default function ReviewPageContent() {
                                             justifyContent: "center",
                                             padding: "0",
                                             backgroundColor: "#dedede",
-                                            pointerEvents: isReviewing ? 'none' : 'auto',
+                                            // F5: 审阅中保留可滚动/可选中，遮罩仅作视觉 tint（见下方 pointerEvents:'none'），
+                                            // 不再整体禁用交互，避免 1-2 分钟审阅期间无法阅读合同。
+                                            pointerEvents: 'auto',
                                         }}
                                     />
                                     {isLoadingDocument && (
@@ -696,7 +675,8 @@ export default function ReviewPageContent() {
                                         <div
                                             className="absolute inset-0"
                                             style={{
-                                                pointerEvents: 'all',
+                                                // F5: 仅视觉提示 tint，不拦截指针事件，保证编辑器可滚动
+                                                pointerEvents: 'none',
                                                 zIndex: 9999,
                                                 backgroundColor: 'rgba(0, 0, 0, 0.2)'
                                             }}

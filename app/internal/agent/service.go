@@ -119,12 +119,18 @@ func GetContractAgent() *ContractAgent {
 }
 
 // LLMContractParse 对外提供的合同解析函数
+// 优先复用启动时初始化的全局 ContractAgent（main.go 中 InitContractAgent 已调用），
+// 避免每次上传都重建 LLM client 与重读 prompt 文件；全局未就绪时兜底新建。
 func LLMContractParse(ctx context.Context, content string) (string, error) {
-	agent, err := NewContractAgent(ctx)
-	if err != nil {
-		return "", err
+	ca := GetContractAgent()
+	if ca == nil {
+		agent, err := NewContractAgent(ctx)
+		if err != nil {
+			return "", err
+		}
+		return agent.ParseContract(ctx, content)
 	}
-	return agent.ParseContract(ctx, content)
+	return ca.ParseContract(ctx, content)
 }
 
 // ExtractJSONFromResponse 从LLM响应中提取JSON

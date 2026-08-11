@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"contract_review/app/internal/contract"
 	"contract_review/app/internal/global"
@@ -115,82 +116,99 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 		close(resultChan)
 	}()
 
-	// 10. 流式输出结果
+	// 10. 流式输出结果（select 循环 + 心跳，避免长审阅期间代理空闲断连）
 	globalIndex := 1
 	totalIssues := 0
 	resultByStableKey := make(map[string]*ReviewResult)
 
-	for result := range resultChan {
-		if result.Progress != nil {
-			h.sendSSEMessage(c, SSEEventProgress, result.Progress)
-			continue
-		}
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 
-		if result.Error != nil {
-			global.Log.Error("分块处理错误", zap.Int("index", result.Index), zap.Error(result.Error))
-			continue
-		}
-
-		// 处理每个修改点
-		for _, mod := range result.Modifications {
-			stableKey := stableModificationKey(mod)
-			reviewResult, exists := resultByStableKey[stableKey]
-			if exists {
-				mergeReviewResult(reviewResult, mod)
-				if err := h.reviewService.UpdateReviewResult(ctx, reviewResult); err != nil {
-					global.Log.Error("更新审阅结果失败", zap.Error(err))
-				}
-			} else {
-				reviewResult = &ReviewResult{
-					SessionID:        task.SessionID,
-					TaskID:           task.ID,
-					Index:            globalIndex,
-					OriginalContent:  mod.OriginalContent,
-					RiskAnalysis:     mod.RiskAnalysis,
-					RiskLevel:        mod.RiskLevel,
-					SuggestedContent: mod.SuggestedContent,
-					Reason:           mod.Reason,
-					RiskType:         mod.RiskType,
-				}
-
-				// 保存到数据库
-				if err := h.reviewService.CreateReviewResult(ctx, reviewResult); err != nil {
-					global.Log.Error("保存审阅结果失败", zap.Error(err))
-				}
-				resultByStableKey[stableKey] = reviewResult
-				globalIndex++
-				totalIssues++
+loop:
+	for {
+		select {
+		case result, ok := <-resultChan:
+			if !ok {
+				break loop
 			}
 
-			// 发送SSE消息
-			sseData := ReviewSSEMessageData{
-				ID:               reviewResult.ID,
-				SessionID:        reviewResult.SessionID,
-				TaskID:           reviewResult.TaskID,
-				Index:            reviewResult.Index,
-				OriginalContent:  reviewResult.OriginalContent,
-				RiskAnalysis:     reviewResult.RiskAnalysis,
-				RiskLevel:        reviewResult.RiskLevel,
-				SuggestedContent: reviewResult.SuggestedContent,
-				Reason:           reviewResult.Reason,
-				RiskType:         reviewResult.RiskType,
-				IsAccepted:       false,
-				CreatedAt:        reviewResult.CreatedAt.Format("2006-01-02 15:04:05"),
+			if result.Progress != nil {
+				h.sendSSEMessage(c, SSEEventProgress, result.Progress)
+				continue
 			}
 
-			h.sendSSEMessage(c, SSEEventMessage, sseData)
+			if result.Error != nil {
+				global.Log.Error("分块处理错误", zap.Int("index", result.Index), zap.Error(result.Error))
+				continue
+			}
+
+			// 处理每个修改点
+			for _, mod := range result.Modifications {
+				stableKey := stableModificationKey(mod)
+				reviewResult, exists := resultByStableKey[stableKey]
+				if exists {
+					mergeReviewResult(reviewResult, mod)
+					if err := h.reviewService.UpdateReviewResult(ctx, reviewResult); err != nil {
+						global.Log.Error("更新审阅结果失败", zap.Error(err))
+					}
+				} else {
+					reviewResult = &ReviewResult{
+						SessionID:        task.SessionID,
+						TaskID:           task.ID,
+						Index:            globalIndex,
+						OriginalContent:  mod.OriginalContent,
+						RiskAnalysis:     mod.RiskAnalysis,
+						RiskLevel:        mod.RiskLevel,
+						SuggestedContent: mod.SuggestedContent,
+						Reason:           mod.Reason,
+						RiskType:         mod.RiskType,
+					}
+
+					// 保存到数据库
+					if err := h.reviewService.CreateReviewResult(ctx, reviewResult); err != nil {
+						global.Log.Error("保存审阅结果失败", zap.Error(err))
+					}
+					resultByStableKey[stableKey] = reviewResult
+					globalIndex++
+					totalIssues++
+				}
+
+				// 发送SSE消息
+				sseData := ReviewSSEMessageData{
+					ID:               reviewResult.ID,
+					SessionID:        reviewResult.SessionID,
+					TaskID:           reviewResult.TaskID,
+					Index:            reviewResult.Index,
+					OriginalContent:  reviewResult.OriginalContent,
+					RiskAnalysis:     reviewResult.RiskAnalysis,
+					RiskLevel:        reviewResult.RiskLevel,
+					SuggestedContent: reviewResult.SuggestedContent,
+					Reason:           reviewResult.Reason,
+					RiskType:         reviewResult.RiskType,
+					IsAccepted:       false,
+					CreatedAt:        reviewResult.CreatedAt.Format("2006-01-02 15:04:05"),
+				}
+
+				h.sendSSEMessage(c, SSEEventMessage, sseData)
+			}
+		case <-heartbeat.C:
+			// SSE 心跳：注释行，前端 processSSEEvent 已过滤 ":" 开头行自动忽略，
+			// 仅用于保持后端->代理->浏览器链路活跃，防止空闲超时断连。
+			c.Write([]byte(": ping\n\n"))
+			c.Flush()
 		}
 	}
 
 	// 11. 等待处理完成
-	if err := <-doneChan; err != nil {
-		global.Log.Error("审阅处理错误", zap.Error(err))
-		// 更新任务状态为失败
+	runErr := <-doneChan
+	if runErr != nil {
+		global.Log.Error("审阅处理错误", zap.Error(runErr))
 		h.reviewService.UpdateTaskStatus(ctx, task.ID, "failed")
-	} else {
-		// 更新任务状态为完成
-		h.reviewService.UpdateTaskStatus(ctx, task.ID, "completed")
+		// 失败时显式发送 error 事件，前端据此报错而非把断流误判为正常完成。
+		h.sendSSEError(c, runErr.Error())
+		return
 	}
+	h.reviewService.UpdateTaskStatus(ctx, task.ID, "completed")
 
 	// 12. 发送结束消息
 	overallRisk := h.reviewService.CalculateOverallRisk(totalIssues)

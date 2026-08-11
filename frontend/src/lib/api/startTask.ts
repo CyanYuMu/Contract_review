@@ -59,13 +59,20 @@ export const startTask = async (
         const decoder = new TextDecoder();
         let buffer = "";
         let finalized = false;
+        let gotEnd = false;
 
-        const finalizeStream = () => {
+        // normalEnd=true: 收到显式 end 事件，正常完成；false: 流意外断开且未收到 end，
+        // 视为连接中断，调用 onError 而非 onCompleted，避免把断流误判为审阅完成。
+        const finalizeStream = (normalEnd: boolean) => {
             if (finalized) return;
             finalized = true;
             onStreamingEnd?.();
-            onCompleted?.();
-            onComplete?.();
+            if (normalEnd) {
+                onCompleted?.();
+                onComplete?.();
+            } else {
+                onError?.(new Error("审阅连接意外中断，请重试"));
+            }
         };
 
         const handleEventText = (eventText: string): boolean => {
@@ -74,7 +81,8 @@ export const startTask = async (
                 throw result.error;
             }
             if (result.complete) {
-                finalizeStream();
+                gotEnd = true;
+                finalizeStream(true);
                 return true;
             }
             return false;
@@ -89,7 +97,7 @@ export const startTask = async (
                     if (remaining.trim()) {
                         handleEventText(remaining);
                     }
-                    finalizeStream();
+                    finalizeStream(gotEnd);
                     break;
                 }
 

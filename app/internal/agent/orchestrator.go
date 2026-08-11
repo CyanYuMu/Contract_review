@@ -257,40 +257,23 @@ func (o *ReviewOrchestrator) ReviewContract(
 	global.Log.Info("Phase 4 完成",
 		zap.Int("suggestionCount", len(report.Suggestions)))
 
-	// ============ Phase 5: 质量反思（QualityGate / Reflection） ============
+	// ============ Phase 5: 质量评估（QualityGate） ============
+	// 说明: 真正的 Reflection 重试（依据反馈重新审阅遗漏条款）尚未实现。
+	// 此前 for retry 循环在 ShouldReflect 命中后并未重新调用 RiskAgent，仅空转更新计数，
+	// 故此处改为单次质量评估，产出评分与关键缺口供前端展示与人工复核，不再空转。
 	o.emitProgress("quality", "QualityGate", "running",
 		"正在进行质量评估...", 0.85, nil)
 
-	for retry := 0; retry <= o.config.MaxReflectionRetries; retry++ {
-		report.ReflectionCount = retry
-
-		eval, err := o.qualityGate.Evaluate(ctx, report)
-		if err != nil {
-			global.Log.Warn("质量评估失败", zap.Error(err))
-			break
-		}
-
+	report.ReflectionCount = 0
+	if eval, err := o.qualityGate.Evaluate(ctx, report); err != nil {
+		global.Log.Warn("质量评估失败", zap.Error(err))
+	} else {
 		report.QualityScore = eval.OverallScore
-
 		global.Log.Info("质量评估结果",
 			zap.Float64("score", eval.OverallScore),
-			zap.Bool("shouldRetry", eval.ShouldRetry),
-			zap.Int("retry", retry))
-
-		if !o.qualityGate.ShouldReflect(eval, retry) {
-			o.emitProgress("quality", "QualityGate", "completed",
-				fmt.Sprintf("质量评估通过 (评分: %.2f)", eval.OverallScore), 0.9, eval)
-			break
-		}
-
-		// Reflection 重试: 将反馈注入 RiskAgent 重新审阅
-		o.emitProgress("quality", "QualityGate", "running",
-			fmt.Sprintf("质量未达标(%.2f)，进行第 %d 次反思优化...", eval.OverallScore, retry+1), 0.85, eval)
-
-		global.Log.Info("触发 Reflection 重试",
-			zap.Int("retry", retry+1),
-			zap.Float64("score", eval.OverallScore),
 			zap.Strings("gaps", eval.CriticalGaps))
+		o.emitProgress("quality", "QualityGate", "completed",
+			fmt.Sprintf("质量评估完成 (评分: %.2f)", eval.OverallScore), 0.9, eval)
 	}
 
 	// ============ Phase 6: 报告生成 ============

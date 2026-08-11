@@ -1,6 +1,6 @@
 "use client";
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { persist, createJSONStorage } from "zustand/middleware";
 import { ReviewProgressEvent, RiskResponse } from "@/lib/Interface";
 
 type RiskState = {
@@ -26,6 +26,64 @@ type RiskState = {
 
 const STORAGE_KEY = "risk-store";
 
+// overwriteRisk 后端按 stableKey 去重后发送完整记录，同 id 视为更新而非增量；
+// 直接覆盖旧值，仅对空字段保留旧值，避免空串覆盖已有内容。
+const overwriteRisk = (old: RiskResponse, next: RiskResponse): RiskResponse => ({
+  ...old,
+  ...next,
+  original_content: next.original_content || old.original_content,
+  risk_analysis: next.risk_analysis || old.risk_analysis,
+  risk_level: next.risk_level || old.risk_level,
+  risk_type: next.risk_type || old.risk_type,
+  suggested_content: next.suggested_content || old.suggested_content,
+  reason: next.reason || old.reason,
+  is_accepted: next.is_accepted ?? old.is_accepted,
+  created_at: next.created_at || old.created_at,
+});
+
+// debouncedStorage 包装 localStorage：每条风险点更新都同步 JSON.stringify+setItem
+// 会阻塞主线程；改为 1s 防抖合并写入，页面卸载前立即冲刷待写，保证最终一致性。
+const pendingWrites: Record<string, { value: string; timer: ReturnType<typeof setTimeout> | null }> = {};
+
+const flushWrite = (name: string) => {
+  const entry = pendingWrites[name];
+  if (!entry) return;
+  if (entry.timer) {
+    clearTimeout(entry.timer);
+    entry.timer = null;
+  }
+  try {
+    localStorage.setItem(name, entry.value);
+  } catch {
+    // 忽略配额超限等写入失败
+  }
+  delete pendingWrites[name];
+};
+
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", () => {
+    Object.keys(pendingWrites).forEach(flushWrite);
+  });
+}
+
+const debouncedStorage = {
+  getItem: (name: string) => localStorage.getItem(name),
+  setItem: (name: string, value: string) => {
+    const entry = pendingWrites[name] || { value, timer: null };
+    entry.value = value;
+    if (entry.timer) clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => flushWrite(name), 1000);
+    pendingWrites[name] = entry;
+  },
+  removeItem: (name: string) => {
+    if (pendingWrites[name]) {
+      clearTimeout(pendingWrites[name].timer as unknown as number);
+      delete pendingWrites[name];
+    }
+    localStorage.removeItem(name);
+  },
+};
+
 export const RiskStore = create<RiskState>()(
   persist(
     (set) => ({
@@ -39,77 +97,13 @@ export const RiskStore = create<RiskState>()(
       addRiskData: (risk) =>
         set((state) => {
           const exists = state.riskDataList.some((item) => item.id === risk.id);
-          if (exists) {
-            const newList = state.riskDataList.map((item) => {
-              if (item.id === risk.id) {
-                const mergeText = (oldText: string, newText: string) => {
-                  if (!newText) return oldText;
-                  if (!oldText) return newText;
-
-                  if (
-                    newText.includes(oldText) &&
-                    newText.length > oldText.length
-                  ) {
-                    return newText;
-                  }
-
-                  if (
-                    oldText.includes(newText) &&
-                    oldText.length > newText.length
-                  ) {
-                    return oldText;
-                  }
-
-                  const overlapLength = Math.min(
-                    20,
-                    Math.min(oldText.length, newText.length)
-                  );
-                  const oldEnd = oldText.slice(-overlapLength);
-                  const newStart = newText.slice(0, overlapLength);
-
-                  if (oldEnd && newStart && oldEnd === newStart) {
-                    return oldText + newText.slice(overlapLength);
-                  }
-
-                  if (
-                    newText.length > oldText.length &&
-                    newText.startsWith(
-                      oldText.slice(0, Math.min(10, oldText.length))
-                    )
-                  ) {
-                    return newText;
-                  }
-
-                  return newText;
-                };
-
-                return {
-                  ...item,
-                  original_content: mergeText(
-                    item.original_content || "",
-                    risk.original_content || ""
-                  ),
-                  risk_analysis: mergeText(
-                    item.risk_analysis || "",
-                    risk.risk_analysis || ""
-                  ),
-                  suggested_content: mergeText(
-                    item.suggested_content || "",
-                    risk.suggested_content || ""
-                  ),
-                  reason: mergeText(item.reason || "", risk.reason || ""),
-                  risk_level: risk.risk_level || item.risk_level,
-                  risk_type: risk.risk_type || item.risk_type,
-                  is_accepted: risk.is_accepted ?? item.is_accepted,
-                  created_at: risk.created_at || item.created_at,
-                };
-              }
-              return item;
-            });
-            return { riskDataList: newList };
+          if (!exists) {
+            return { riskDataList: [...state.riskDataList, risk] };
           }
           return {
-            riskDataList: [...state.riskDataList, risk],
+            riskDataList: state.riskDataList.map((item) =>
+              item.id === risk.id ? overwriteRisk(item, risk) : item
+            ),
           };
         }),
       setRiskDataList: (riskList, sourceFileUrl) => set({
@@ -158,6 +152,7 @@ export const RiskStore = create<RiskState>()(
     }),
     {
       name: STORAGE_KEY,
+      storage: createJSONStorage(() => debouncedStorage),
       partialize: (state) => ({
         riskDataList: state.riskDataList,
         isCompleted: state.isCompleted,

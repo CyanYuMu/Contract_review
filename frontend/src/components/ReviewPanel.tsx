@@ -4,7 +4,6 @@ import {Button, Form, Input, Radio} from "antd";
 import Image from "next/image";
 import {useRouter} from "next/navigation";
 import toast from "react-hot-toast";
-import {flushSync} from "react-dom";
 import {startTask} from "@/lib/api/startTask";
 import {RiskResponse, StartTaskRequest} from "@/lib/Interface";
 import {TaskStore} from "@/store/taskStore";
@@ -138,75 +137,6 @@ export default function ReviewPanel({
         setHasUploadedContract(hasContract);
     }, [uploadData]);
 
-    // 提取 Word 文档的 DOM 内容
-    const extractWordDOM = async (fileUrl: string): Promise<string> => {
-        try {
-            // 获取文件
-            const response = await fetch(fileUrl);
-            if (!response.ok) {
-                throw new Error(`获取文件失败: ${response.status}`);
-            }
-
-            const arrayBuffer = await response.arrayBuffer();
-
-            // 创建临时容器来渲染 Word 文档
-            const tempContainer = document.createElement("div");
-            tempContainer.style.position = "absolute";
-            tempContainer.style.left = "-9999px";
-            tempContainer.style.top = "-9999px";
-            document.body.appendChild(tempContainer);
-
-            const editableContainer = document.createElement("div");
-            const styleContainer = document.createElement("div");
-            tempContainer.appendChild(editableContainer);
-            tempContainer.appendChild(styleContainer);
-
-            try {
-                // 动态导入 docx-preview
-                const docx = await import("docx-preview");
-
-                // 渲染 Word 文档
-                await docx.renderAsync(arrayBuffer, editableContainer, styleContainer, {
-                    className: "docx",
-                    inWrapper: true,
-                    ignoreWidth: false,
-                    ignoreHeight: true,
-                    ignoreFonts: false,
-                    breakPages: false,
-                    ignoreLastRenderedPageBreak: true,
-                    experimental: false,
-                    trimXmlDeclaration: true,
-                    useBase64URL: true,
-                    renderChanges: false,
-                    renderHeaders: true,
-                    renderFooters: true,
-                    renderFootnotes: true,
-                    renderEndnotes: true,
-                    renderComments: false,
-                    renderAltChunks: true,
-                    debug: false,
-                });
-
-                // 获取渲染后的 HTML
-                const htmlContent = editableContainer.innerHTML;
-
-                // 清理临时容器
-                document.body.removeChild(tempContainer);
-
-                return htmlContent;
-            } catch (error) {
-                // 清理临时容器
-                if (document.body.contains(tempContainer)) {
-                    document.body.removeChild(tempContainer);
-                }
-                throw error;
-            }
-        } catch (error) {
-            console.error("提取 Word DOM 失败:", error);
-            throw new Error("无法解析 Word 文档");
-        }
-    };
-
     const handleSubmit = async () => {
         try {
             setLoading(true);
@@ -289,7 +219,6 @@ export default function ReviewPanel({
             toast.dismiss("create-task-hint");
             setLoading(false);
             if (onSuccess) onSuccess();
-            router.push("/review");
 
             startTask(
                 {
@@ -299,11 +228,12 @@ export default function ReviewPanel({
                     intensity: payload.intensity,
                     description: payload.description ?? null,
                 },
-                undefined,
+                () => {
+                    // F2: SSE 连接成功后再导航，避免连接失败时用户跳到空审阅页只剩 toast
+                    router.push("/review");
+                },
                 (risk) => {
-                    flushSync(() => {
-                        addRiskData(risk);
-                    });
+                    addRiskData(risk);
                     if (onRiskData) {
                         onRiskData(risk);
                     }

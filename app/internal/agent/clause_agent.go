@@ -77,14 +77,17 @@ func (ca *ClauseAgent) Execute(ctx context.Context, input AgentInput) (AgentOutp
 
 // structuralSplit 基于文档结构的条款拆分
 func (ca *ClauseAgent) structuralSplit(text string) []Clause {
+	// 每个模式用捕获组 1 包裹条款标题主体；前导 (?:^|\n|。|；|;|！|！) 容忍
+	// PDF 文本提取后丢失换行/格式的连续文本——只要标题前是行首、换行或句末标点即可匹配。
+	// 使用 FindAllStringSubmatchIndex 取捕获组起始下标，避免前导字符导致定位偏移。
 	patterns := []struct {
 		pattern *regexp.Regexp
 		level   string
 	}{
-		{regexp.MustCompile(`(?m)^第[一二三四五六七八九十百千\d]+条[：:\s]`), "article"},
-		{regexp.MustCompile(`(?m)^第[一二三四五六七八九十百千\d]+章[：:\s]`), "chapter"},
-		{regexp.MustCompile(`(?m)^[一二三四五六七八九十]+[、.][^\n]+`), "section"},
-		{regexp.MustCompile(`(?m)^\d+[.、]\d*[.、]?\s*[^\n]+`), "subsection"},
+		{regexp.MustCompile(`(?:^|\n|。|；|;|！|！|\s)(第[一二三四五六七八九十百千\d]+条[：:\s][^\n]*)`), "article"},
+		{regexp.MustCompile(`(?:^|\n|。|；|;|！|！|\s)(第[一二三四五六七八九十百千\d]+章[：:\s][^\n]*)`), "chapter"},
+		{regexp.MustCompile(`(?:^|\n|。|；|;|！|！)([一二三四五六七八九十]+[、.][^\n]+)`), "section"},
+		{regexp.MustCompile(`(?:^|\n|。|；|;|！|！)(\d+[.、]\d*[.、]?\s*[^\n]+)`), "subsection"},
 	}
 
 	type splitPoint struct {
@@ -95,16 +98,20 @@ func (ca *ClauseAgent) structuralSplit(text string) []Clause {
 
 	var points []splitPoint
 	for _, p := range patterns {
-		matches := p.pattern.FindAllStringIndex(text, -1)
+		matches := p.pattern.FindAllStringSubmatchIndex(text, -1)
 		for _, m := range matches {
-			lineEnd := strings.Index(text[m[0]:], "\n")
-			title := text[m[0]:]
-			if lineEnd != -1 {
-				title = text[m[0] : m[0]+lineEnd]
+			if len(m) < 4 {
+				continue
+			}
+			headerStart, headerEnd := m[2], m[3]
+			title := strings.TrimSpace(text[headerStart:headerEnd])
+			// PDF 无换行时 [^\n]* 可能吞到文末，截断过长的标题（仅展示用，不影响内容切片）。
+			if r := []rune(title); len(r) > 60 {
+				title = string(r[:60]) + "…"
 			}
 			points = append(points, splitPoint{
-				index: m[0],
-				title: strings.TrimSpace(title),
+				index: headerStart,
+				title: title,
 				level: p.level,
 			})
 		}
