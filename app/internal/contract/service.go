@@ -206,12 +206,7 @@ func (cs *ContractService) FileLoad(ctx context.Context, account string, filePat
 }
 
 func (cs *ContractService) ensureContractTypeID(ctx context.Context, typeName string) (uint64, error) {
-	name := strings.TrimSpace(typeName)
-	if name == "" {
-		name = "其他"
-	}
-	name = limitString(name, 64)
-
+	name := classifyContractType(typeName)
 	contractType, err := cs.contractRepo.GetContractTypeByName(ctx, name)
 	if err == nil && contractType != nil {
 		return contractType.ID, nil
@@ -233,6 +228,47 @@ func (cs *ContractService) ensureContractTypeID(ctx context.Context, typeName st
 		return defaultType.ID, nil
 	}
 	return contractType.ID, nil
+}
+
+// 标准合同分类（七大类 + 通用兜底），全量归一化映射使用。
+var standardContractTypes = []string{
+	"买卖合同", "服务合同", "劳动合同", "租赁合同",
+	"借款合同", "合作合同", "知识产权合同", "通用",
+}
+
+// classifyContractType 将 LLM 解析出的自由文本合同类型归一化到七大类之一，
+// 无法匹配时回退到 "其他"（由 ensureDefaultContractType 兜底）。
+func classifyContractType(raw string) string {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "其他"
+	}
+	name = limitString(name, 64)
+
+	// 关键词 -> 标准分类映射表（按优先级顺序匹配）
+	rules := []struct {
+		keywords []string
+		standard string
+	}{
+		{[]string{"买卖", "采购", "购销", "销售", "经销", "供货", "货物", "商品", "购货"}, "买卖合同"},
+		{[]string{"服务", "外包", "咨询", "运维", "维护", "技术服", "委托开发"}, "服务合同"},
+		{[]string{"劳动", "劳务", "用工", "聘用", "雇佣", "竞业"}, "劳动合同"},
+		{[]string{"租赁", "租", "承租", "出租"}, "租赁合同"},
+		{[]string{"借款", "贷款", "融资", "民间借贷", "还款"}, "借款合同"},
+		{[]string{"合作", "合伙", "合资", "联营", "共同"}, "合作合同"},
+		{[]string{"知识产权", "专利", "商标", "著作权", "版权", "许可", "技术转让", "技术开发"}, "知识产权合同"},
+		{[]string{"通用", "一般", "其他", "综合"}, "通用"},
+	}
+
+	lower := strings.ToLower(name)
+	for _, rule := range rules {
+		for _, kw := range rule.keywords {
+			if strings.Contains(lower, strings.ToLower(kw)) {
+				return rule.standard
+			}
+		}
+	}
+	return "其他"
 }
 
 func (cs *ContractService) ensureDefaultContractType(ctx context.Context) (*ContractType, error) {

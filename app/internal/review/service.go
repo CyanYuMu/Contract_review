@@ -4,7 +4,9 @@ import (
 	"context"
 	"contract_review/app/internal/agent"
 	"contract_review/app/internal/contract"
+	"contract_review/app/internal/gateway"
 	"contract_review/app/internal/global"
+	"contract_review/app/internal/knowledge"
 	"contract_review/app/internal/llm"
 	"contract_review/app/internal/middleware/redis"
 	"contract_review/app/internal/rag"
@@ -13,14 +15,12 @@ import (
 	"hash/fnv"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	fmodel "github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -47,6 +47,8 @@ type ReviewService struct {
 	vectorConfigKey   string
 	vectorIndexMu     sync.Mutex
 	vectorIndexHashes map[string]string
+	orchMu              sync.Mutex
+	knowledgeSignature  string
 }
 
 // NewReviewService 创建审阅服务
@@ -97,12 +99,16 @@ func (s *ReviewService) loadPromptTemplates() error {
 		s.basePrompt = defaultBasePrompt
 	}
 
-	// 加载不同合同类型的提示词
+	// 加载不同合同类型的提示词（七大类标准分类 + 通用兜底）
 	contractTypePrompts := map[string]string{
-		"基建类合同": "contract_reviewer_prompt_build.txt",
-		"货物类合同": "contract_reviewer_prompt_sales.txt",
-		"服务类合同": "contract_reviewer_prompt_service.txt",
-		"通用":    "contract_reviewer_prompt_base.txt",
+		"买卖合同":     "contract_reviewer_prompt_sale.txt",
+		"服务合同":     "contract_reviewer_prompt_service.txt",
+		"劳动合同":     "contract_reviewer_prompt_labor.txt",
+		"租赁合同":     "contract_reviewer_prompt_lease.txt",
+		"借款合同":     "contract_reviewer_prompt_loan.txt",
+		"合作合同":     "contract_reviewer_prompt_coop.txt",
+		"知识产权合同": "contract_reviewer_prompt_ip.txt",
+		"通用":        "contract_reviewer_prompt_base.txt",
 	}
 
 	for contractType, filename := range contractTypePrompts {
@@ -232,380 +238,6 @@ func (s *ReviewService) DeleteReviewResults(ctx context.Context, taskID uint64) 
 
 // ============ Contract Review Core Logic ============
 
-// ReviewContract 审阅合同分块
-func (s *ReviewService) ReviewContract(
-	ctx context.Context,
-	chunkText string,
-	stance string,
-	intensity string,
-	chunkContext string,
-	contractType string,
-) ([]ModificationItem, error) {
-	if s.llm == nil {
-		if err := s.InitLLM(ctx); err != nil {
-			return nil, fmt.Errorf("初始化LLM失败: %w", err)
-		}
-	}
-
-	// 构建审阅提示词
-	reviewPrompt := s.buildReviewPrompt(chunkText, stance, intensity, chunkContext, contractType)
-
-	// 创建消息
-	template := prompt.FromMessages(schema.GoTemplate,
-		&schema.Message{
-			Role:    schema.System,
-			Content: "你是一个专业的合同审查律师，请严格按照提示词要求进行合同审阅。",
-		},
-		&schema.Message{
-			Role:    schema.User,
-			Content: reviewPrompt,
-		},
-	)
-
-	messages, err := template.Format(ctx, map[string]any{})
-	if err != nil {
-		global.Log.Error("格式化提示词失败", zap.Error(err))
-		return nil, fmt.Errorf("格式化提示词失败: %w", err)
-	}
-
-	// 调用LLM
-	response, err := s.llm.Generate(ctx, messages)
-	if err != nil {
-		global.Log.Error("LLM调用失败", zap.Error(err))
-		return nil, fmt.Errorf("LLM调用失败: %w", err)
-	}
-
-	// 解析审阅结果
-	modifications := s.parseReviewResult(response.Content)
-
-	return modifications, nil
-}
-
-// buildReviewPrompt 构建审阅提示词
-func (s *ReviewService) buildReviewPrompt(chunkText, stance, intensity, chunkContext, contractType string) string {
-	// 获取合同类型对应的提示词
-	contractTypePrompt := s.contractPrompts[contractType]
-	if contractTypePrompt == "" {
-		contractTypePrompt = s.contractPrompts["通用"]
-	}
-
-	// 上下文信息
-	contextInfo := ""
-	if chunkContext != "" {
-		contextInfo = fmt.Sprintf(`
-## 审阅上下文
-%s
-
-请结合上述上下文信息，确保审阅的连续性和一致性。
-`, chunkContext)
-	}
-
-	// 强度描述
-	intensityDescMap := map[string]string{
-		"严格": "请进行严格审阅，覆盖全部审查维度，识别所有潜在法律与履约风险，包括措辞模糊、权利不对等等细节问题。",
-		"标准": "请进行标准审阅，重点关注7个核心风险领域（交付、质量、违约、知识产权、保密、争议解决、生效要件）。",
-		"宽松": "请进行宽松审阅，仅指出重大法律风险（如无效免责、管辖不明、主体缺失、违约无责等），忽略一般性模糊表述。",
-	}
-	intensityDesc := intensityDescMap[intensity]
-	if intensityDesc == "" {
-		intensityDesc = intensityDescMap["标准"]
-	}
-
-	// 使用基础提示词模板
-	basePrompt := s.basePrompt
-	if basePrompt == "" {
-		basePrompt = defaultBasePrompt
-	}
-	basePrompt = strings.ReplaceAll(basePrompt, "{stance}", stance)
-
-	// 构建完整提示词
-	return fmt.Sprintf(`%s
-
-## 任务要求
-- 用户立场：%s
-- 审查强度：%s
-- 合同类型：%s
-- 审阅要点：%s
-- %s
-
-%s
-
-## 合同内容
-%s
-
-请严格按照上述格式要求输出审阅结果。每个修改点必须包含：
-1. 【修改点X】
-2. 【原文】（100字以内）
-3. 【风险分析】
-4. 【风险等级】
-5. 【修改后的内容】
-6. 【修改理由】
-7. 【风险类型】（15字内）
-确保分析专业、建议可行、格式规范。
-`, basePrompt, stance, intensity, contractType, contractTypePrompt, intensityDesc, contextInfo, chunkText)
-}
-
-// parseReviewResult 解析审阅结果
-func (s *ReviewService) parseReviewResult(reviewResult string) []ModificationItem {
-	var modifications []ModificationItem
-
-	global.Log.Info("开始解析审阅结果", zap.Int("contentLength", len(reviewResult)))
-
-	// 多种格式的匹配模式
-	patterns := []string{
-		// 模式1: 【修改点X】格式
-		`【修改点(\d+)】[^\n]*\n(.*?)(?=【修改点\d+】|$)`,
-		// 模式2: ## 修改点X 格式
-		`##\s*修改点(\d+)[^\n]*\n(.*?)(?=##\s*修改点\d+|$)`,
-		// 模式3: ### 修改点X 格式
-		`###\s*修改点(\d+)[^\n]*\n(.*?)(?=###\s*修改点\d+|$)`,
-		// 模式4: 数字编号格式
-		`(\d+)\.\s*修改点[^\n]*\n(.*?)(?=\d+\.\s*修改点|$)`,
-		// 模式5: 通用标题格式
-		`[#]*\s*修改点(\d+)[^\n]*\n(.*?)(?=[#]*\s*修改点\d+|$)`,
-	}
-
-	var matches [][]string
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(`(?s)` + pattern)
-		matches = re.FindAllStringSubmatch(reviewResult, -1)
-		if len(matches) > 0 {
-			global.Log.Info("使用模式匹配到修改点", zap.Int("count", len(matches)))
-			break
-		}
-	}
-
-	if len(matches) == 0 {
-		global.Log.Warn("未匹配到标准格式，尝试宽松匹配")
-		return s.parseLooseFormat(reviewResult)
-	}
-
-	// 处理匹配到的修改点
-	for _, match := range matches {
-		if len(match) < 3 {
-			continue
-		}
-		pointNum := match[1]
-		content := strings.TrimSpace(match[2])
-
-		modification := ModificationItem{
-			Position: fmt.Sprintf("修改点%s", pointNum),
-		}
-
-		// 提取原文
-		modification.OriginalContent = s.extractField(content, []string{
-			`【?\s*原文\s*】?[：:\s]*([\s\S]*?)(?=【?\s*风险分析\s*】?|【?\s*风险等级\s*】?|【?\s*修改后的内容\s*】?|$)`,
-			`原文[：:]\s*(.*?)(?=风险|修改)`,
-		}, "未找到原文内容")
-
-		// 提取风险分析
-		modification.RiskAnalysis = s.extractField(content, []string{
-			`【?\s*风险分析\s*】?[：:\s]*([\s\S]*?)(?=【?\s*风险等级\s*】?|【?\s*修改后的内容\s*】?|$)`,
-			`风险分析?[：:]\s*(.*?)(?=风险等级|修改)`,
-		}, "未找到风险分析")
-
-		// 提取风险等级
-		modification.RiskLevel = s.extractField(content, []string{
-			`【风险等级】[：:\s]*([\s\S]*?)(?=【修改后的内容】|【修改理由】|$)`,
-			`风险等级[：:\s]*([\s\S]*?)(?=【修改后的内容】|修改|【修改理由】|$)`,
-		}, "未知")
-
-		// 提取修改后内容
-		modification.SuggestedContent = s.extractField(content, []string{
-			`【?\s*修改后的内容\s*】?[：:\s]*([\s\S]*?)(?=【?\s*修改理由\s*】?|$)`,
-			`修改后?[：:]\s*(.*?)(?=\n|$)`,
-		}, "未找到修改建议")
-
-		// 提取修改理由
-		modification.Reason = s.extractField(content, []string{
-			`【修改理由】[：:\s]*([\s\S]*?)(?=\n*【|$)`,
-			`修改理由[：:\s]*([\s\S]*?)(?=\n*【|$)`,
-		}, "未找到修改理由")
-
-		// 提取风险类型
-		modification.RiskType = s.extractField(content, []string{
-			`【风险类型】[：:\s]*([\s\S]*?)(?=\n*【|$)`,
-			`风险类型[：:\s]*([\s\S]*?)(?=\n*【|$)`,
-		}, "未找到风险类型")
-
-		modifications = append(modifications, modification)
-	}
-
-	if len(modifications) == 0 {
-		global.Log.Warn("未找到任何修改点，返回空列表")
-	} else {
-		global.Log.Info("解析完成", zap.Int("modificationCount", len(modifications)))
-	}
-
-	return modifications
-}
-
-// extractField 提取字段内容
-func (s *ReviewService) extractField(content string, patterns []string, defaultValue string) string {
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(`(?s)` + pattern)
-		match := re.FindStringSubmatch(content)
-		if len(match) > 1 {
-			result := strings.TrimSpace(match[1])
-			if result != "" {
-				return result
-			}
-		}
-	}
-	return defaultValue
-}
-
-// parseLooseFormat 宽松格式解析
-func (s *ReviewService) parseLooseFormat(reviewResult string) []ModificationItem {
-	var modifications []ModificationItem
-
-	// 按段落分割
-	sections := regexp.MustCompile(`\n\s*\n`).Split(reviewResult, -1)
-	var currentMod *ModificationItem
-
-	for _, section := range sections {
-		section = strings.TrimSpace(section)
-		if section == "" {
-			continue
-		}
-
-		// 检查是否是新的修改点
-		modPointRe := regexp.MustCompile(`(?i)修改点\s*(\d+)`)
-		if modPointRe.MatchString(section) {
-			if currentMod != nil {
-				modifications = append(modifications, *currentMod)
-			}
-			match := modPointRe.FindStringSubmatch(section)
-			currentMod = &ModificationItem{
-				Position: fmt.Sprintf("修改点%s", match[1]),
-			}
-		}
-
-		// 提取内容
-		if currentMod != nil {
-			if regexp.MustCompile(`(?i)原文`).MatchString(section) && currentMod.OriginalContent == "" {
-				currentMod.OriginalContent = section
-			} else if regexp.MustCompile(`(?i)风险分析|风险`).MatchString(section) && currentMod.RiskAnalysis == "" {
-				currentMod.RiskAnalysis = section
-			} else if regexp.MustCompile(`(?i)修改`).MatchString(section) && currentMod.SuggestedContent == "" {
-				currentMod.SuggestedContent = section
-			}
-		}
-	}
-
-	if currentMod != nil {
-		modifications = append(modifications, *currentMod)
-	}
-
-	return modifications
-}
-
-// ProcessContractReview 处理合同审阅（并发处理分块）
-func (s *ReviewService) ProcessContractReview(
-	ctx context.Context,
-	task *ReviewTask,
-	contractContent string,
-	maxConcurrent int,
-	resultChan chan<- ChunkResult,
-) error {
-	// 分割合同内容
-	chunks := splitTextByLength(contractContent, 4000)
-	totalChunks := len(chunks)
-
-	global.Log.Info("开始处理合同审阅",
-		zap.Int("totalChunks", totalChunks),
-		zap.Int("maxConcurrent", maxConcurrent))
-
-	// 更新任务状态为处理中
-	if err := s.UpdateTaskStatus(ctx, task.ID, "processing"); err != nil {
-		return err
-	}
-
-	// 创建信号量控制并发
-	semaphore := make(chan struct{}, maxConcurrent)
-	var wg sync.WaitGroup
-
-	// 存储结果的通道
-	internalResults := make(chan ChunkResult, totalChunks)
-
-	// 并发处理每个分块
-	for idx, chunk := range chunks {
-		wg.Add(1)
-		go func(index int, content string) {
-			defer wg.Done()
-
-			// 获取信号量
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			// 检查上下文是否已取消
-			select {
-			case <-ctx.Done():
-				internalResults <- ChunkResult{
-					Index: index,
-					Error: ctx.Err(),
-				}
-				return
-			default:
-			}
-
-			// 构建上下文信息
-			chunkContext := fmt.Sprintf("这是第 %d 个分块，共 %d 个。", index+1, totalChunks)
-
-			// 调用审阅
-			mods, err := s.ReviewContract(ctx, content, task.Stance, task.Intensity, chunkContext, task.ContractType)
-			internalResults <- ChunkResult{
-				Index:         index,
-				Modifications: mods,
-				Error:         err,
-			}
-		}(idx, chunk)
-	}
-
-	// 等待所有任务完成并关闭通道
-	go func() {
-		wg.Wait()
-		close(internalResults)
-	}()
-
-	// 收集结果并按顺序发送
-	receivedResults := make(map[int]ChunkResult)
-	nextToEmit := 0
-
-	for result := range internalResults {
-		receivedResults[result.Index] = result
-
-		// 按顺序发送已完成的结果
-		for {
-			if res, ok := receivedResults[nextToEmit]; ok {
-				resultChan <- res
-				delete(receivedResults, nextToEmit)
-				nextToEmit++
-			} else {
-				break
-			}
-		}
-	}
-
-	return nil
-}
-
-// splitTextByLength 按长度分割文本
-func splitTextByLength(text string, maxLength int) []string {
-	var chunks []string
-	runes := []rune(text)
-
-	for i := 0; i < len(runes); i += maxLength {
-		end := i + maxLength
-		if end > len(runes) {
-			end = len(runes)
-		}
-		chunks = append(chunks, string(runes[i:end]))
-	}
-
-	return chunks
-}
-
 // CalculateOverallRisk 计算整体风险等级
 func (s *ReviewService) CalculateOverallRisk(totalIssues int) string {
 	if totalIssues > 10 {
@@ -626,7 +258,27 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 		}
 	}
 
+	// 知识库陈旧判断：签名未变且编排器已存在时直接复用，避免每次审阅全量重载知识库。
+	// 签名查询失败时回退到全量加载（保持原行为）。sig 为空表示未能获取签名，不参与复用判断。
+	var pendingSig string
+	if sig, err := knowledge.NewRepo(global.DB).KnowledgeSignature(ctx); err == nil {
+		pendingSig = sig
+		s.orchMu.Lock()
+		reuse := s.orchestrator != nil && s.knowledgeSignature == sig
+		s.orchMu.Unlock()
+		if reuse {
+			global.Log.Debug("知识库签名未变化，复用已构建的 Agent 编排器", zap.String("signature", sig))
+			return nil
+		}
+	} else {
+		global.Log.Warn("知识库签名查询失败，执行全量加载", zap.Error(err))
+	}
+
 	llmGenerate := func(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
+		// 优先走大模型网关（统一入口 + 限流/配额/成本/语义缓存）；网关不可用时回退原 LLM
+		if global.Gateway != nil {
+			return global.Gateway.Generate(ctx, messages)
+		}
 		return s.llm.Generate(ctx, messages)
 	}
 
@@ -707,11 +359,17 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 	suggestionTools := []agent.Tool{ragSearchTool, contractContextTool}
 
 	orchConfig := agent.DefaultOrchestratorConfig()
-	// Phase 1 优化: 启用 Reflection 重试以确保质量
-	orchConfig.MaxReflectionRetries = 1
-	orchConfig.ReflectionThreshold = 0.6
+	// 质量评估：仅单次评估产出评分/缺口，不进行 Reflection 空转重试（真正的带反馈重审尚未实现）。
+	orchConfig.MaxReflectionRetries = 0
 
 	s.orchestrator = agent.NewReviewOrchestrator(llmGenerate, ragRetriever, suggestionTools, orchConfig)
+
+	// 编排器构建成功后，记录知识库签名，供后续审阅复用判断。
+	if pendingSig != "" {
+		s.orchMu.Lock()
+		s.knowledgeSignature = pendingSig
+		s.orchMu.Unlock()
+	}
 
 	global.Log.Info("Agent 编排器初始化完成",
 		zap.Bool("vector_enabled", vectorStore != nil),
@@ -917,7 +575,7 @@ func defaultReviewKnowledgeChunks() []rag.Chunk {
 		content  string
 	}{
 		{"builtin-1", "规范", "通用", "内置审阅指引", "合同应明确服务范围、交付成果、验收标准、付款节点、违约责任、解除条件、知识产权归属、保密义务、争议解决和管辖。缺少上述核心条款或表述不清，通常构成履约争议风险。"},
-		{"builtin-2", "规范", "服务类合同", "内置服务合同审阅指引", "服务类合同应明确服务内容、服务期限、质量标准、验收流程、整改期限、费用支付条件、成果知识产权归属和逾期违约责任。仅列附件或笼统描述服务内容，容易导致验收和付款争议。"},
+		{"builtin-2", "规范", "服务合同", "内置服务合同审阅指引", "服务合同应明确服务内容、服务期限、质量标准、验收流程、整改期限、费用支付条件、成果知识产权归属和逾期违约责任。仅列附件或笼统描述服务内容，容易导致验收和付款争议。"},
 		{"builtin-3", "法规", "通用", "《中华人民共和国民法典》合同编通用规则", "当事人应当按照约定全面履行自己的义务。一方不履行合同义务或者履行不符合约定的，应承担继续履行、采取补救措施或者赔偿损失等违约责任。"},
 		{"builtin-4", "规范", "通用", "内置违约责任审阅指引", "违约责任应与主要义务对应，至少覆盖逾期付款、逾期交付、质量不合格、擅自解除、保密违约和知识产权侵权等场景。仅约定一方责任或责任过轻，可能对审查立场不利。"},
 		{"builtin-5", "规范", "通用", "内置争议解决审阅指引", "争议解决条款应明确适用法律、管辖法院或仲裁机构。管辖地、仲裁机构名称不明或同时约定诉讼与仲裁，可能导致争议解决成本和效力风险。"},
@@ -953,6 +611,9 @@ func (s *ReviewService) AgentReviewContract(
 	if err := s.InitOrchestrator(ctx); err != nil {
 		return fmt.Errorf("初始化 Agent 编排器失败: %w", err)
 	}
+
+	// 注入调用方信息，供网关成本归因与限流配额使用（功能=review）
+	ctx = gateway.WithCaller(ctx, task.UserID, "", gateway.FeatureReview)
 
 	meta := agent.ContractMeta{
 		ContractType: task.ContractType,

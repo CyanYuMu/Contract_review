@@ -38,7 +38,7 @@ func (t *RAGSearchTool) Parameters() map[string]interface{} {
 			},
 			"contract_type": map[string]interface{}{
 				"type":        "string",
-				"description": "合同类型过滤，如'服务类合同'、'货物类合同'、'基建类合同'、'通用'",
+				"description": "合同类型过滤，如'买卖合同'、'服务合同'、'劳动合同'、'租赁合同'、'借款合同'、'合作合同'、'知识产权合同'、'通用'",
 			},
 			"category": map[string]interface{}{
 				"type":        "string",

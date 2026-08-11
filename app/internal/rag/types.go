@@ -8,7 +8,7 @@ type Document struct {
 	Title       string            `json:"title"`
 	Content     string            `json:"content"`
 	Category    string            `json:"category"`     // 规范/法规/案例/示范
-	SubCategory string            `json:"sub_category"` // 服务类/货物类/基建类/通用
+	SubCategory string            `json:"sub_category"` // 买卖/服务/劳动/租赁/借款/合作/知识产权/通用
 	Source      string            `json:"source"`
 	Metadata    map[string]string `json:"metadata"`
 }
