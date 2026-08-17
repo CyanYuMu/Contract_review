@@ -357,12 +357,25 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) (*agent.ReviewOrch
 
 	// 父子分块：parent 分块不参与检索，仅用于 child 命中后回填上下文。
 	retrievableChunks, parentChunks := rag.PartitionChunks(knowledgeChunks)
+	metaCovered, childChunks := 0, 0
+	for _, c := range retrievableChunks {
+		if c.Metadata["risk_type"] != "" {
+			metaCovered++
+		}
+		if c.ChunkType == rag.ChunkTypeChild {
+			childChunks++
+		}
+	}
 	if err := keywordIndex.Index(retrievableChunks); err != nil {
 		global.Log.Warn("审阅知识库入关键词索引失败", zap.Error(err))
 	} else {
+		// 诊断日志：parents=0 表示父子分块当前无数据驱动（空转）；
+		// meta_covered 表示多少分块带结构化 metadata（P0 生效范围）。
 		global.Log.Info("审阅知识库已加载到关键词索引",
 			zap.Int("chunks", len(retrievableChunks)),
-			zap.Int("parents", len(parentChunks)))
+			zap.Int("parents", len(parentChunks)),
+			zap.Int("meta_covered", metaCovered),
+			zap.Int("child_chunks", childChunks))
 	}
 
 	// ======== Phase 1: 向量检索 + BM25 初始化 ========

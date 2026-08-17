@@ -174,6 +174,10 @@ func (r *RAGRetriever) retrieveWithOverride(query string, filters map[string]str
 	wg.Wait()
 	close(errChan)
 
+	// 诊断日志：展示三路检索通道各自的命中数，用于确认 BM25/关键词通道是否真正参与召回。
+	log.Printf("rag: 检索通道命中 查询=%q 向量=%d bm25=%d 关键词=%d",
+		truncateRunes(query, 80), len(vectorResults), len(bm25Results), len(keywordResults))
+
 	// 所有通道都失败
 	if len(vectorResults) == 0 && len(bm25Results) == 0 && len(keywordResults) == 0 {
 		return nil, nil
@@ -224,6 +228,7 @@ func (r *RAGRetriever) retrieveWithOverride(query string, filters map[string]str
 		merged = filterByRelevance(merged, r.config.MinRelevance)
 	}
 
+	log.Printf("rag: 检索完成 查询=%q 最终返回=%d", truncateRunes(query, 80), len(merged))
 	return merged, nil
 }
 
@@ -234,20 +239,25 @@ func (r *RAGRetriever) retrieveWithOverride(query string, filters map[string]str
 func (r *RAGRetriever) expandParents(results []SearchResult) []SearchResult {
 	out := make([]SearchResult, 0, len(results))
 	seenParent := make(map[string]bool, len(results))
+	expanded, deduped, passthrough := 0, 0, 0
 	for _, res := range results {
 		if res.ParentChunkID == "" {
+			passthrough++
 			out = append(out, res)
 			continue
 		}
 		parent, ok := r.parents[res.ParentChunkID]
 		if !ok {
+			passthrough++
 			out = append(out, res)
 			continue
 		}
 		if seenParent[parent.ID] {
+			deduped++
 			continue
 		}
 		seenParent[parent.ID] = true
+		expanded++
 		if res.Metadata == nil {
 			res.Metadata = map[string]string{}
 		}
@@ -255,6 +265,7 @@ func (r *RAGRetriever) expandParents(results []SearchResult) []SearchResult {
 		res.Content = parent.Content
 		out = append(out, res)
 	}
+	log.Printf("rag: 父子回填 输入=%d 回填parent=%d 去重=%d 直通=%d", len(results), expanded, deduped, passthrough)
 	return out
 }
 
@@ -499,6 +510,7 @@ func (ski *SimpleKeywordIndex) rebuildLocked() {
 	} else {
 		ski.avgDocLen = 0
 	}
+	log.Printf("rag: 关键词BM25索引已构建 docs=%d avgDocLen=%.2f", ski.docCount, ski.avgDocLen)
 }
 
 func (ski *SimpleKeywordIndex) SearchableChunks() []Chunk {

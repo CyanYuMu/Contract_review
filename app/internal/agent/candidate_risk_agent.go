@@ -259,10 +259,21 @@ func (a *CandidateRiskAgent) reviewCandidateBatch(ctx context.Context, batchInde
 	step.Observation = truncateText(resp.Content, 1200)
 
 	findings := parseCandidateRiskFindings(resp.Content, sets)
+	verifiedCount, unverifiedCount := 0, 0
+	for _, f := range findings {
+		if f.Verified {
+			verifiedCount++
+		} else {
+			unverifiedCount++
+		}
+	}
+	// 诊断日志：verified 收紧后，verified/unverified 分布可直观看出"无实质依据的候选被降级"是否生效。
 	global.Log.Info("候选驱动批量风险审阅完成",
 		zap.Int("batchIndex", batchIndex),
 		zap.Int("clauseCount", len(sets)),
 		zap.Int("findingCount", len(findings)),
+		zap.Int("verifiedCount", verifiedCount),
+		zap.Int("unverifiedCount", unverifiedCount),
 		zap.Duration("duration", time.Since(start)))
 	return findings, step, nil
 }
