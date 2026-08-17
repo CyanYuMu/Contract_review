@@ -37,6 +37,7 @@ type RiskCandidate struct {
 	ApplicableClauses   []string `json:"applicable_clauses"`
 	LegalBasis          string   `json:"legal_basis"`
 	RecommendedTemplate string   `json:"recommended_template"`
+	RiskContent         string   `json:"risk_content"`
 	Content             string   `json:"content"`
 	Source              string   `json:"source"`
 	Category            string   `json:"category"`
@@ -294,18 +295,31 @@ func buildCandidateQuery(clause Clause, meta ContractMeta) string {
 
 func riskCandidateFromSearchResult(result rag.SearchResult) RiskCandidate {
 	content := result.Content
+	md := result.Metadata
+	if md == nil {
+		md = map[string]string{}
+	}
+	// 结构化元数据优先；旧数据（无 metadata）回退到从拍扁文本中反解字段。
+	field := func(metaKey, contentField string) string {
+		if v := strings.TrimSpace(md[metaKey]); v != "" {
+			return v
+		}
+		return extractKnowledgeField(content, contentField)
+	}
+
 	candidate := RiskCandidate{
-		ID:                  firstNonEmpty(extractKnowledgeField(content, "风险点ID"), result.Metadata["vector_id"], result.ChunkID),
-		RiskType:            firstNonEmpty(extractKnowledgeField(content, "风险类型"), result.Metadata["risk_type"]),
-		RiskLevel:           normalizeRiskLevel(firstNonEmpty(extractKnowledgeField(content, "风险等级"), result.Metadata["risk_level"])),
-		TriggerCondition:    extractKnowledgeField(content, "触发条件"),
-		Keywords:            splitListField(extractKnowledgeField(content, "关键词")),
-		ApplicableClauses:   splitListField(extractKnowledgeField(content, "适用条款")),
-		LegalBasis:          extractKnowledgeField(content, "法律依据"),
-		RecommendedTemplate: extractKnowledgeField(content, "推荐修改模板"),
+		ID:                  firstNonEmpty(field("risk_id", "风险点ID"), md["vector_id"], result.ChunkID),
+		RiskType:            field("risk_type", "风险类型"),
+		RiskLevel:           normalizeRiskLevel(field("risk_level", "风险等级")),
+		TriggerCondition:    field("trigger_condition", "触发条件"),
+		Keywords:            splitListField(field("keywords", "关键词")),
+		ApplicableClauses:   splitListField(field("applicable_clauses", "适用条款")),
+		LegalBasis:          field("legal_basis", "法律依据"),
+		RecommendedTemplate: field("recommended_template", "推荐修改模板"),
+		RiskContent:         field("risk_content", "风险内容"),
 		Content:             truncateText(content, 900),
-		Source:              firstNonEmpty(result.Source, result.Metadata["source"], result.Metadata["title"]),
-		Category:            result.Metadata["category"],
+		Source:              firstNonEmpty(result.Source, md["source"], md["title"]),
+		Category:            md["category"],
 		Score:               result.Score,
 	}
 	if candidate.RiskLevel == "" {
@@ -416,6 +430,10 @@ func parseCandidateRiskFindings(text string, sets []candidateClauseSet) []RiskFi
 
 		legalBasis := normalizeLegalBasis(raw.LegalBasis, raw.CandidateIDs, candidateMap[clauseID])
 		verified := raw.Verified && len(legalBasis) > 0
+		// 确定性护栏：LLM 声称已验证但自评置信度过低（且确实给出了分数）→ 降级为待人工确认。
+		if verified && raw.Confidence > 0 && raw.Confidence < 0.3 {
+			verified = false
+		}
 		requiresHumanReview := raw.RequiresHumanReview || !verified
 		findings = append(findings, RiskFinding{
 			FindingID:           findingID,
@@ -448,12 +466,19 @@ func mapCandidatesByClause(sets []candidateClauseSet) map[string]map[string]Risk
 	return out
 }
 
+// normalizeLegalBasis 归一化法律/审阅依据，只保留"可定位、有实质内容"的依据。
+// 目的：避免把"未配置"等占位文本或整段拍扁模板当作依据，导致未经验证的风险被误判为已验证。
 func normalizeLegalBasis(raw []LegalBasis, candidateIDs []string, candidates map[string]RiskCandidate) []LegalBasis {
 	out := make([]LegalBasis, 0, len(raw)+len(candidateIDs))
 	seen := make(map[string]bool)
+
+	// 1. LLM 直接输出的依据：内容有效，且来源或条款编号至少一个能定位。
 	for _, basis := range raw {
+		if !isCredibleBasis(basis.Source, basis.Article, basis.Content) {
+			continue
+		}
 		key := basis.Source + "|" + basis.Article + "|" + basis.Content
-		if strings.TrimSpace(key) == "||" || seen[key] {
+		if seen[key] {
 			continue
 		}
 		seen[key] = true
@@ -464,25 +489,87 @@ func normalizeLegalBasis(raw []LegalBasis, candidateIDs []string, candidates map
 			Relevance: clampConfidence(basis.Relevance),
 		})
 	}
+
+	// 2. 候选风险点派生的依据：优先法律依据，其次风险内容（审阅规范依据），最后纯文本审阅指引。
 	for _, id := range candidateIDs {
 		candidate, ok := candidates[id]
 		if !ok {
 			continue
 		}
-		content := firstNonEmpty(candidate.LegalBasis, candidate.TriggerCondition, candidate.Content)
-		key := candidate.Source + "|" + candidate.ID + "|" + content
-		if strings.TrimSpace(key) == "||" || seen[key] {
+		content, source, article := candidateBasisFields(candidate)
+		if content == "" {
+			continue
+		}
+		key := source + "|" + article + "|" + content
+		if seen[key] {
 			continue
 		}
 		seen[key] = true
 		out = append(out, LegalBasis{
-			Source:    firstNonEmpty(candidate.Source, candidate.Category, "知识库候选"),
-			Article:   candidate.ID,
+			Source:    source,
+			Article:   article,
 			Content:   limitText(content, 500),
 			Relevance: candidate.Score,
 		})
 	}
 	return out
+}
+
+// candidateBasisFields 返回候选风险点可作为"依据"的 (内容, 来源, 条款)。
+// 优先级：法律依据 > 风险内容（审阅规范依据）> 纯文本审阅指引（种子/内置知识）。
+// 显式排除"【风险点配置】"这类拍扁模板，避免把它当依据。
+func candidateBasisFields(candidate RiskCandidate) (content, source, article string) {
+	src := candidateSource(candidate)
+	ref := firstNonEmpty(candidate.RiskType, candidate.ID)
+
+	if isMeaningfulBasis(candidate.LegalBasis) {
+		return candidate.LegalBasis, src, ref
+	}
+	if isMeaningfulBasis(candidate.RiskContent) {
+		return candidate.RiskContent, src, ref
+	}
+	trimmed := strings.TrimSpace(candidate.Content)
+	if isMeaningfulBasis(trimmed) && !strings.HasPrefix(trimmed, "【风险点配置】") {
+		return trimmed, src, ref
+	}
+	return "", "", ""
+}
+
+// candidateSource 返回候选风险点的来源标识。
+func candidateSource(candidate RiskCandidate) string {
+	return firstNonEmpty(candidate.Source, candidate.Category, "审阅知识库")
+}
+
+// isCredibleBasis 判断 LLM 输出的依据是否可信：内容有效，且来源或条款编号至少一个能定位（非占位）。
+func isCredibleBasis(source, article, content string) bool {
+	if !isMeaningfulBasis(content) {
+		return false
+	}
+	if !isMeaningfulBasis(source) && !isMeaningfulBasis(article) {
+		return false
+	}
+	return true
+}
+
+// placeholderBasis 常见的"未配置"占位文本，不构成有效依据。
+var placeholderBasis = map[string]bool{
+	"未配置": true, "无": true, "暂无": true, "待补全": true, "待补充": true,
+	"n/a": true, "na": true, "null": true, "none": true, "-": true, "—": true,
+}
+
+// isMeaningfulBasis 判断依据内容是否有实质含义（非空、非占位、长度足够）。
+func isMeaningfulBasis(s string) bool {
+	t := strings.ToLower(strings.TrimSpace(s))
+	if t == "" {
+		return false
+	}
+	if placeholderBasis[t] {
+		return false
+	}
+	if utf8.RuneCountInString(t) <= 1 {
+		return false
+	}
+	return true
 }
 
 func extractKnowledgeField(content, field string) string {
