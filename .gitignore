@@ -99,3 +99,12 @@ temp/
 *.db
 *.sqlite
 /frontend/tsconfig.tsbuildinfo
+
+# Build binary at repo root (compiled from app/internal/cmd)
+/cmd
+
+# Runtime config with secrets at repo root (DO NOT commit)
+/config/
+
+# Claude local settings (contains test JWT / machine-local permissions)
+.claude/settings.local.json
