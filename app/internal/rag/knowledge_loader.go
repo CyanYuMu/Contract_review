@@ -35,16 +35,22 @@ func LoadKnowledgeChunksFromDB(ctx context.Context, db *gorm.DB) ([]Chunk, error
 			"chunk_index":  fmt.Sprintf("%d", row.ChunkIndex),
 			"vector_id":    row.VectorID,
 		}
+		// parent_chunk_id 放入 metadata，随向量写入 Milvus metadata_json，供向量通道回填父块。
+		if row.ParentChunkID != "" {
+			base["parent_chunk_id"] = row.ParentChunkID
+		}
 		// 合并结构化元数据（风险点字段等）；结构化值优先，基础字段作兜底。
 		meta, err := mergeChunkMetadata(row.Metadata, base)
 		if err != nil {
 			meta = base
 		}
 		out = append(out, Chunk{
-			ID:       chunkID,
-			DocID:    docIDStr,
-			Content:  row.Content,
-			Metadata: meta,
+			ID:            chunkID,
+			DocID:         docIDStr,
+			Content:       row.Content,
+			Metadata:      meta,
+			ParentChunkID: row.ParentChunkID,
+			ChunkType:     row.ChunkType,
 		})
 	}
 	return out, nil

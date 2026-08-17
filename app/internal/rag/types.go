@@ -13,6 +13,12 @@ type Document struct {
 	Metadata    map[string]string `json:"metadata"`
 }
 
+// ChunkType 分块类型常量（父子分块）。
+const (
+	ChunkTypeParent = "parent" // 上下文单元：不参与检索，仅用于命中子块后回填
+	ChunkTypeChild  = "child"  // 检索单元：小分块，参与向量/关键词检索
+)
+
 // Chunk 文档分块
 // ContextHeader 不占 Content 字符位置，在 EmbeddingContent() 时前置拼接
 type Chunk struct {
@@ -23,6 +29,7 @@ type Chunk struct {
 	Embedding     []float32         `json:"embedding,omitempty"`
 	Metadata      map[string]string `json:"metadata"`
 	ParentChunkID string            `json:"parent_chunk_id,omitempty"` // Parent-Child: 指向父 chunk ID
+	ChunkType     string            `json:"chunk_type,omitempty"`      // child/parent，空值等价 child
 }
 
 // EmbeddingContent 返回用于 embedding 的文本内容
@@ -37,15 +44,16 @@ func (c Chunk) EmbeddingContent() string {
 
 // SearchResult 检索结果
 type SearchResult struct {
-	ChunkID     string            `json:"chunk_id"`
-	DocID       string            `json:"doc_id"`
-	Content     string            `json:"content"`
-	Score       float64           `json:"score"`
-	Source      string            `json:"source"`
-	Metadata    map[string]string `json:"metadata"`
-	RerankScore float64           `json:"rerank_score,omitempty"` // Rerank 模型分数
-	BaseScore   float64           `json:"base_score,omitempty"`   // 原始检索分数
-	ChunkType   string            `json:"chunk_type,omitempty"`   // "parent" / "child"
+	ChunkID       string            `json:"chunk_id"`
+	DocID         string            `json:"doc_id"`
+	Content       string            `json:"content"`
+	Score         float64           `json:"score"`
+	Source        string            `json:"source"`
+	Metadata      map[string]string `json:"metadata"`
+	RerankScore   float64           `json:"rerank_score,omitempty"`    // Rerank 模型分数
+	BaseScore     float64           `json:"base_score,omitempty"`      // 原始检索分数
+	ChunkType     string            `json:"chunk_type,omitempty"`      // 检索通道: vector/bm25/keyword
+	ParentChunkID string            `json:"parent_chunk_id,omitempty"` // 父分块 ID（父子分块回填用）
 }
 
 // SearchRequest 检索请求
@@ -58,39 +66,39 @@ type SearchRequest struct {
 
 // RetrieverConfig 检索器配置
 type RetrieverConfig struct {
-	TopK                int     `json:"top_k"`                 // 最终返回数量
-	FinalTopK           int     `json:"final_top_k"`           // 最终返回数量（重排后）
-	VectorWeight        float64 `json:"vector_weight"`         // RRF 向量检索权重
-	KeywordWeight       float64 `json:"keyword_weight"`        // RRF 关键词检索权重
-	BM25Weight          float64 `json:"bm25_weight"`           // RRF BM25 检索权重
-	MinRelevance        float64 `json:"min_relevance"`         // 最低相关度阈值
-	OversampleMultiplier int    `json:"oversample_multiplier"` // 过采样倍数，默认 5
-	OversampleMin       int     `json:"oversample_min"`        // 过采样最低数量，默认 25
-	OversampleMax       int     `json:"oversample_max"`        // 过采样最高数量，默认 100
-	EnableBM25          bool    `json:"enable_bm25"`           // 是否启用 BM25
-	EnableRerank        bool    `json:"enable_rerank"`         // 是否启用 Rerank
-	MMRLambda           float64 `json:"mmr_lambda"`            // MMR 相关性与多样性权衡 (0-1)
-	RerankThreshold     float64 `json:"rerank_threshold"`      // Rerank 阈值（低于此分数的结果被过滤）
-	RRFK                float64 `json:"rrf_k"`                 // RRF 平滑常数 K
+	TopK                 int     `json:"top_k"`                 // 最终返回数量
+	FinalTopK            int     `json:"final_top_k"`           // 最终返回数量（重排后）
+	VectorWeight         float64 `json:"vector_weight"`         // RRF 向量检索权重
+	KeywordWeight        float64 `json:"keyword_weight"`        // RRF 关键词检索权重
+	BM25Weight           float64 `json:"bm25_weight"`           // RRF BM25 检索权重
+	MinRelevance         float64 `json:"min_relevance"`         // 最低相关度阈值
+	OversampleMultiplier int     `json:"oversample_multiplier"` // 过采样倍数，默认 5
+	OversampleMin        int     `json:"oversample_min"`        // 过采样最低数量，默认 25
+	OversampleMax        int     `json:"oversample_max"`        // 过采样最高数量，默认 100
+	EnableBM25           bool    `json:"enable_bm25"`           // 是否启用 BM25
+	EnableRerank         bool    `json:"enable_rerank"`         // 是否启用 Rerank
+	MMRLambda            float64 `json:"mmr_lambda"`            // MMR 相关性与多样性权衡 (0-1)
+	RerankThreshold      float64 `json:"rerank_threshold"`      // Rerank 阈值（低于此分数的结果被过滤）
+	RRFK                 float64 `json:"rrf_k"`                 // RRF 平滑常数 K
 }
 
 // DefaultRetrieverConfig 默认检索配置
 func DefaultRetrieverConfig() RetrieverConfig {
 	return RetrieverConfig{
-		TopK:                10,
-		FinalTopK:           5,
-		VectorWeight:        0.5,
-		KeywordWeight:       0.2,
-		BM25Weight:          0.3,
-		MinRelevance:        0.0,
+		TopK:                 10,
+		FinalTopK:            5,
+		VectorWeight:         0.5,
+		KeywordWeight:        0.2,
+		BM25Weight:           0.3,
+		MinRelevance:         0.0,
 		OversampleMultiplier: 5,
-		OversampleMin:       25,
-		OversampleMax:       100,
-		EnableBM25:          false,
-		EnableRerank:        false,
-		MMRLambda:           0.7,
-		RerankThreshold:     0.2,
-		RRFK:                60,
+		OversampleMin:        25,
+		OversampleMax:        100,
+		EnableBM25:           false,
+		EnableRerank:         false,
+		MMRLambda:            0.7,
+		RerankThreshold:      0.2,
+		RRFK:                 60,
 	}
 }
 

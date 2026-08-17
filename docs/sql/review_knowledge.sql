@@ -25,16 +25,21 @@ CREATE TABLE IF NOT EXISTS `review_knowledge_chunks` (
   `content` longtext NOT NULL COMMENT '分块文本',
   `vector_id` varchar(128) DEFAULT NULL COMMENT '向量库ID(Milvus等)',
   `metadata` json DEFAULT NULL COMMENT '结构化元数据(风险点字段等)',
+  `parent_chunk_id` varchar(128) DEFAULT NULL COMMENT '父分块ID(父子分块)',
+  `chunk_type` varchar(16) DEFAULT NULL COMMENT 'child/parent',
   `created_at` datetime(3) DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_review_knowledge_chunks_doc_id` (`doc_id`),
+  KEY `idx_review_knowledge_chunks_parent` (`parent_chunk_id`),
   CONSTRAINT `fk_review_knowledge_chunks_doc` FOREIGN KEY (`doc_id`) REFERENCES `review_knowledge_docs` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='审阅知识库分块';
 
--- 已存在分块表（老库）需要补充 metadata 列时，手动执行下面这条（新库无需，CREATE TABLE 已包含）。
+-- 已存在分块表（老库）需要补充列时，手动执行下面这些（新库无需，CREATE TABLE 已包含）。
 -- 应用启动时 GORM AutoMigrate 也会自动补列；此条仅供手工维护数据库的部署参考。
 -- ALTER TABLE `review_knowledge_chunks`
---   ADD COLUMN `metadata` json DEFAULT NULL COMMENT '结构化元数据(风险点字段等)' AFTER `vector_id`;
+--   ADD COLUMN `metadata` json DEFAULT NULL COMMENT '结构化元数据(风险点字段等)' AFTER `vector_id`,
+--   ADD COLUMN `parent_chunk_id` varchar(128) DEFAULT NULL COMMENT '父分块ID(父子分块)' AFTER `metadata`,
+--   ADD COLUMN `chunk_type` varchar(16) DEFAULT NULL COMMENT 'child/parent' AFTER `parent_chunk_id`;
 
 -- 示例种子：一条规范 + 一条法规（indexed 才会被 RAG 加载）
 INSERT INTO `review_knowledge_docs`

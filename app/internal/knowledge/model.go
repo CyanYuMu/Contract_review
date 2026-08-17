@@ -30,7 +30,11 @@ type ReviewKnowledgeChunk struct {
 	// Metadata 结构化元数据（JSON 字符串）。风险点分块在此存放 risk_type/risk_level/
 	// trigger_condition/keywords/applicable_clauses/legal_basis/recommended_template/
 	// risk_content 等字段，供 RAG 命中后直接读取，避免从拍扁文本正则反解。
-	Metadata  string    `gorm:"type:json;comment:结构化元数据(JSON)" json:"metadata,omitempty"`
+	Metadata string `gorm:"type:json;comment:结构化元数据(JSON)" json:"metadata,omitempty"`
+	// ParentChunkID 父分块 ID（父子分块：子块用于检索，命中后回填父块补全上下文）
+	ParentChunkID string `gorm:"type:varchar(128);comment:父分块ID" json:"parent_chunk_id,omitempty"`
+	// ChunkType 分块类型：child(检索单元)/parent(上下文单元)，空值等价 child
+	ChunkType string    `gorm:"type:varchar(16);comment:child/parent" json:"chunk_type,omitempty"`
 	CreatedAt time.Time `gorm:"autoCreateTime" json:"created_at"`
 }
 

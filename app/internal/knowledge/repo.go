@@ -19,16 +19,18 @@ func NewRepo(db *gorm.DB) *Repo {
 
 // IndexedChunkRow JOIN 查询结果，供 rag 包组装为 Chunk
 type IndexedChunkRow struct {
-	ChunkID    uint64 `gorm:"column:chunk_id"`
-	DocID      uint64 `gorm:"column:doc_id"`
-	ChunkIndex int    `gorm:"column:chunk_index"`
-	Content    string `gorm:"column:content"`
-	VectorID   string `gorm:"column:vector_id"`
-	Metadata   string `gorm:"column:metadata"`
-	Title      string `gorm:"column:title"`
-	Category   string `gorm:"column:category"`
-	SubCat     string `gorm:"column:sub_category"`
-	Source     string `gorm:"column:source"`
+	ChunkID       uint64 `gorm:"column:chunk_id"`
+	DocID         uint64 `gorm:"column:doc_id"`
+	ChunkIndex    int    `gorm:"column:chunk_index"`
+	Content       string `gorm:"column:content"`
+	VectorID      string `gorm:"column:vector_id"`
+	Metadata      string `gorm:"column:metadata"`
+	ParentChunkID string `gorm:"column:parent_chunk_id"`
+	ChunkType     string `gorm:"column:chunk_type"`
+	Title         string `gorm:"column:title"`
+	Category      string `gorm:"column:category"`
+	SubCat        string `gorm:"column:sub_category"`
+	Source        string `gorm:"column:source"`
 }
 
 // ListIndexedChunksForRAG 列出已索引文档的全部分块
@@ -41,6 +43,8 @@ func (r *Repo) ListIndexedChunksForRAG(ctx context.Context) ([]IndexedChunkRow, 
 	err := r.db.WithContext(ctx).Table("review_knowledge_chunks AS c").
 		Select(`c.id AS chunk_id, c.doc_id, c.chunk_index, c.content, c.vector_id,
 			COALESCE(c.metadata, '{}') AS metadata,
+			COALESCE(c.parent_chunk_id, '') AS parent_chunk_id,
+			COALESCE(c.chunk_type, '') AS chunk_type,
 			d.title, d.category, d.sub_category, d.source`).
 		Joins("INNER JOIN review_knowledge_docs AS d ON d.id = c.doc_id").
 		Where("d.status = ?", "indexed").
