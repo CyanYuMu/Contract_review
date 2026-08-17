@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // ReviewHandler 审阅处理器
@@ -42,8 +44,8 @@ func NewReviewHandler(reviewService *ReviewService, contractService *contract.Co
 // @Router /api/review/start [post]
 func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestContext) {
 	// 1. 验证用户登录状态
-	userIDStr := middleware.GetCurrentUserID(c)
-	if userIDStr == "" {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		global.Log.Error("用户未登录")
 		c.JSON(401, response.Unauthorized())
 		return
@@ -73,7 +75,7 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 	c.Response.Header.Set("X-Accel-Buffering", "no")
 
 	// 5. 创建审阅任务
-	task, err := h.reviewService.CreateReviewTask(ctx, userIDStr, &req)
+	task, err := h.reviewService.CreateReviewTask(ctx, scope.Account, scope.UserID, &req)
 	if err != nil {
 		global.Log.Error("创建审阅任务失败", zap.Error(err))
 		h.sendSSEError(c, err.Error())
@@ -81,16 +83,19 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 	}
 
 	// 6. 获取合同内容
-	contractInfo, err := h.contractService.GetContractByID(ctx, task.FileID)
+	contractInfo, err := h.contractService.GetContractByIDForAccount(ctx, scope.Account, task.FileID)
 	if err != nil || contractInfo == nil {
 		global.Log.Error("获取合同信息失败", zap.Error(err))
 		h.sendSSEError(c, "获取合同信息失败")
 		return
 	}
 
-	// 7. 读取合同内容
+	// 7. 读取合同内容（优先使用已持久化的提取文本，避免重复解析文件）
 	var contractContent string
-	if contractInfo.FilePath != "" {
+	if contractInfo.RawText != "" {
+		contractContent = contractInfo.RawText
+	} else if contractInfo.FilePath != "" {
+		// 兼容旧合同：raw_text 为空时才从文件重新提取
 		filePath := contract.LocalFilePath(contractInfo.FilePath)
 		contractContent, err = utils.ExtractText(filePath)
 		if err != nil {
@@ -108,10 +113,15 @@ func (h *ReviewHandler) StartReviewTask(ctx context.Context, c *app.RequestConte
 	// 8. 创建结果通道
 	resultChan := make(chan ChunkResult, 100)
 	doneChan := make(chan error, 1)
+	// Phase 0 stopgap: keep the in-process review alive when the browser or
+	// proxy disconnects. Phase 2 will replace this with a durable review run
+	// worker and event store.
+	runCtx, cancelRun := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Minute)
+	defer cancelRun()
 
 	// 9. 启动后台处理
 	go func() {
-		err := h.reviewService.AgentReviewContract(ctx, task, contractInfo, contractContent, resultChan)
+		err := h.reviewService.AgentReviewContract(runCtx, task, contractInfo, contractContent, resultChan)
 		doneChan <- err
 		close(resultChan)
 	}()
@@ -148,7 +158,7 @@ loop:
 				reviewResult, exists := resultByStableKey[stableKey]
 				if exists {
 					mergeReviewResult(reviewResult, mod)
-					if err := h.reviewService.UpdateReviewResult(ctx, reviewResult); err != nil {
+					if err := h.reviewService.UpdateReviewResult(runCtx, reviewResult); err != nil {
 						global.Log.Error("更新审阅结果失败", zap.Error(err))
 					}
 				} else {
@@ -165,7 +175,7 @@ loop:
 					}
 
 					// 保存到数据库
-					if err := h.reviewService.CreateReviewResult(ctx, reviewResult); err != nil {
+					if err := h.reviewService.CreateReviewResult(runCtx, reviewResult); err != nil {
 						global.Log.Error("保存审阅结果失败", zap.Error(err))
 					}
 					resultByStableKey[stableKey] = reviewResult
@@ -203,12 +213,12 @@ loop:
 	runErr := <-doneChan
 	if runErr != nil {
 		global.Log.Error("审阅处理错误", zap.Error(runErr))
-		h.reviewService.UpdateTaskStatus(ctx, task.ID, "failed")
+		h.reviewService.UpdateTaskStatus(runCtx, task.ID, "failed")
 		// 失败时显式发送 error 事件，前端据此报错而非把断流误判为正常完成。
 		h.sendSSEError(c, runErr.Error())
 		return
 	}
-	h.reviewService.UpdateTaskStatus(ctx, task.ID, "completed")
+	h.reviewService.UpdateTaskStatus(runCtx, task.ID, "completed")
 
 	// 12. 发送结束消息
 	overallRisk := h.reviewService.CalculateOverallRisk(totalIssues)
@@ -231,6 +241,12 @@ loop:
 // @Success 200 {object} ReviewTaskResponse
 // @Router /api/review/task [get]
 func (h *ReviewHandler) GetReviewTask(ctx context.Context, c *app.RequestContext) {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
+	userID := scope.UserID
 	sessionIDStr := c.Query("session_id")
 	sessionID, err := strconv.ParseUint(sessionIDStr, 10, 64)
 	if err != nil {
@@ -238,7 +254,7 @@ func (h *ReviewHandler) GetReviewTask(ctx context.Context, c *app.RequestContext
 		return
 	}
 
-	task, err := h.reviewService.GetReviewTask(ctx, sessionID)
+	task, err := h.reviewService.GetReviewTask(ctx, userID, sessionID)
 	if err != nil {
 		c.JSON(500, response.ServerError())
 		return
@@ -259,6 +275,12 @@ func (h *ReviewHandler) GetReviewTask(ctx context.Context, c *app.RequestContext
 // @Success 200 {object} ReviewTaskResponse
 // @Router /api/review/task/:id [get]
 func (h *ReviewHandler) GetReviewTaskByID(ctx context.Context, c *app.RequestContext) {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
+	userID := scope.UserID
 	idStr := c.Param("id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -266,7 +288,7 @@ func (h *ReviewHandler) GetReviewTaskByID(ctx context.Context, c *app.RequestCon
 		return
 	}
 
-	task, err := h.reviewService.GetReviewTaskByID(ctx, id)
+	task, err := h.reviewService.GetReviewTaskByID(ctx, userID, id)
 	if err != nil {
 		c.JSON(500, response.ServerError())
 		return
@@ -288,13 +310,13 @@ func (h *ReviewHandler) GetReviewTaskByID(ctx context.Context, c *app.RequestCon
 // @Success 200 {object} ReviewTaskListResponse
 // @Router /api/review/tasks [get]
 func (h *ReviewHandler) ListReviewTasks(ctx context.Context, c *app.RequestContext) {
-	userIDStr := middleware.GetCurrentUserID(c)
-	if userIDStr == "" {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		c.JSON(401, response.Unauthorized())
 		return
 	}
-	userID, _ := strconv.ParseUint(userIDStr, 10, 64)
 
+	userID := scope.UserID
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
 
@@ -332,6 +354,12 @@ func (h *ReviewHandler) ListReviewTasks(ctx context.Context, c *app.RequestConte
 // @Success 200 {object} ReviewResultListResponse
 // @Router /api/review/results [get]
 func (h *ReviewHandler) GetReviewResults(ctx context.Context, c *app.RequestContext) {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
+	userID := scope.UserID
 	taskIDStr := c.Query("task_id")
 	taskID, err := strconv.ParseUint(taskIDStr, 10, 64)
 	if err != nil {
@@ -339,8 +367,12 @@ func (h *ReviewHandler) GetReviewResults(ctx context.Context, c *app.RequestCont
 		return
 	}
 
-	results, err := h.reviewService.GetReviewResults(ctx, taskID)
+	results, err := h.reviewService.GetReviewResults(ctx, userID, taskID)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(404, response.NotFound())
+			return
+		}
 		c.JSON(500, response.ServerError())
 		return
 	}
@@ -364,6 +396,12 @@ func (h *ReviewHandler) GetReviewResults(ctx context.Context, c *app.RequestCont
 // @Success 200 {object} ReviewResultListResponse
 // @Router /api/review/results/session [get]
 func (h *ReviewHandler) GetReviewResultsBySessionID(ctx context.Context, c *app.RequestContext) {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
+	userID := scope.UserID
 	sessionIDStr := c.Query("session_id")
 	sessionID, err := strconv.ParseUint(sessionIDStr, 10, 64)
 	if err != nil {
@@ -371,8 +409,12 @@ func (h *ReviewHandler) GetReviewResultsBySessionID(ctx context.Context, c *app.
 		return
 	}
 
-	results, err := h.reviewService.GetReviewResultsBySessionID(ctx, sessionID)
+	results, err := h.reviewService.GetReviewResultsBySessionID(ctx, userID, sessionID)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(404, response.NotFound())
+			return
+		}
 		c.JSON(500, response.ServerError())
 		return
 	}
@@ -396,6 +438,12 @@ func (h *ReviewHandler) GetReviewResultsBySessionID(ctx context.Context, c *app.
 // @Success 200 {object} response.Result
 // @Router /api/review/task/:id [delete]
 func (h *ReviewHandler) DeleteReviewTask(ctx context.Context, c *app.RequestContext) {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
+	userID := scope.UserID
 	idStr := c.Param("id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -403,13 +451,18 @@ func (h *ReviewHandler) DeleteReviewTask(ctx context.Context, c *app.RequestCont
 		return
 	}
 
-	if err := h.reviewService.DeleteReviewTask(ctx, id); err != nil {
+	if err := h.reviewService.DeleteReviewTask(ctx, userID, id); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(404, response.NotFound())
+			return
+		}
 		c.JSON(500, response.FailWithMsg("删除任务失败"))
 		return
 	}
 
 	c.JSON(200, response.Ok())
 }
+
 
 // ============ 辅助方法 ============
 

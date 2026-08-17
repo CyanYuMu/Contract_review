@@ -75,6 +75,7 @@ async function handleChatStreamRequest(
             method: 'POST',
             headers,
             body,
+            signal: request.signal,
         });
 
         if (!response.ok) {
@@ -83,31 +84,7 @@ async function handleChatStreamRequest(
             return NextResponse.json(errorData, {status: response.status});
         }
 
-        const stream = new ReadableStream({
-            async start(controller) {
-                const reader = response.body?.getReader();
-                if (!reader) {
-                    controller.close();
-                    return;
-                }
-
-                try {
-                    while (true) {
-                        const {done, value} = await reader.read();
-                        if (done) {
-                            console.log('[SSE] 流式传输完成');
-                            controller.close();
-                            break;
-                        }
-                        controller.enqueue(value);
-                    }
-                } catch (error) {
-                    controller.error(error);
-                }
-            },
-        });
-
-        return new Response(stream, {
+        return new Response(response.body, {
             headers: {
                 'Content-Type': 'text/event-stream',
                 'Cache-Control': 'no-cache',
@@ -165,13 +142,35 @@ async function handleRequest(
             method,
             headers,
             body,
+            signal: request.signal,
         });
 
         const contentType = response.headers.get('content-type') || '';
         const isJsonExpected = contentType.includes('application/json');
+        const commonHeaders = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        };
+
+        // Preserve binary responses as streams. Reading them as text corrupts
+        // DOCX and PDF downloads.
+        if (!isJsonExpected) {
+            const responseHeaders = new Headers(commonHeaders);
+            for (const name of ['content-type', 'content-disposition', 'content-length', 'accept-ranges']) {
+                const value = response.headers.get(name);
+                if (value) responseHeaders.set(name, value);
+            }
+            responseHeaders.set('cache-control', 'private, no-store');
+            return new NextResponse(response.body, {
+                status: response.status,
+                headers: responseHeaders,
+            });
+        }
+
         let rawText: string | null = null;
         let data: unknown = null;
-        let isJson = isJsonExpected;
+        let isJson: boolean = isJsonExpected;
 
         try {
             rawText = await response.text();
@@ -201,12 +200,6 @@ async function handleRequest(
             status: response.status,
             data: isJson ? data : '[non-json body]',
         });
-
-        const commonHeaders = {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type',
-        };
 
         if (isJson) {
             return NextResponse.json(data, {

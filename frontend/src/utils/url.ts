@@ -1,13 +1,24 @@
 export const resolveFileUrl = (url?: string): string => {
     if (!url) return "";
 
-    if (url.startsWith("/api/static/") || url.startsWith("/uploads/") || url.startsWith("uploads/")) {
+    if (
+        url.startsWith("/api/static/") ||
+        url.startsWith("/uploads/") ||
+        url.startsWith("uploads/") ||
+        url.startsWith("/api/contract/download/") ||
+        url.startsWith("/contract/download/")
+    ) {
         return buildStaticFileUrl(url);
     }
 
     if (/^https?:\/\//i.test(url)) {
         const pathname = new URL(url).pathname;
-        if (pathname.startsWith("/api/static/") || pathname.startsWith("/uploads/")) {
+        if (
+            pathname.startsWith("/api/static/") ||
+            pathname.startsWith("/uploads/") ||
+            pathname.startsWith("/api/contract/download/") ||
+            pathname.startsWith("/contract/download/")
+        ) {
             return buildStaticFileUrl(url);
         }
         return url;
@@ -51,13 +62,17 @@ export const buildStaticFileUrl = (fileUrl?: string): string => {
     let proxyPath = path;
     if (proxyPath.startsWith('/api/static/')) {
       proxyPath = proxyPath.replace(/^\/api\/static(?=\/|$)/, '/api/proxy/static');
+    } else if (proxyPath.startsWith('/api/contract/download/')) {
+      proxyPath = proxyPath.replace(/^\/api(?=\/contract\/download\/)/, '/api/proxy');
+    } else if (proxyPath.startsWith('/contract/download/')) {
+      proxyPath = '/api/proxy' + proxyPath;
     } else if (proxyPath.startsWith('/uploads/')) {
       proxyPath = `/api/proxy/static${proxyPath.slice('/uploads'.length)}`;
     } else if (proxyPath.startsWith('uploads/')) {
       proxyPath = `/api/proxy/static/${proxyPath.slice('uploads/'.length)}`;
     }
 
-    if (/^\/api\/proxy\/static\//.test(proxyPath)) {
+    if (/^\/api\/proxy\/(static|contract\/download)\//.test(proxyPath)) {
       return getFrontendOrigin() + proxyPath;
     }
 
@@ -78,6 +93,8 @@ export const buildStaticFileUrl = (fileUrl?: string): string => {
 
   if (
     fileUrl.startsWith('/api/static/') ||
+    fileUrl.startsWith('/api/contract/download/') ||
+    fileUrl.startsWith('/contract/download/') ||
     fileUrl.startsWith('/uploads/') ||
     fileUrl.startsWith('uploads/')
   ) {

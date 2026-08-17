@@ -79,10 +79,11 @@ func (h *UserHandler) Login(ctx context.Context, c *app.RequestContext) {
 		RefreshToken: refreshToken,
 		ExpiresIn:    int64(global.Config.JWT.AccessTokenExpireMin * 60),
 		User: UserProfile{
-			Id:        int64(user.ID),
-			Account:   user.Account,
-			Username:  user.Username,
-			CreatedAt: user.CreatedAt.Unix(),
+			Id:         int64(user.ID),
+			Account:    user.Account,
+			Username:   user.Username,
+			SystemRole: user.SystemRole,
+			CreatedAt:  user.CreatedAt.Unix(),
 		},
 	}
 	c.JSON(consts.StatusOK, response.OK(resp))
@@ -192,10 +193,11 @@ func (h *UserHandler) UpdateUser(ctx context.Context, c *app.RequestContext) {
 
 	resp := UpdateUserResponse{
 		User: UserProfile{
-			Id:        int64(user.ID),
-			Account:   user.Account,
-			Username:  user.Username,
-			CreatedAt: user.CreatedAt.Unix(),
+			Id:         int64(user.ID),
+			Account:    user.Account,
+			Username:   user.Username,
+			SystemRole: user.SystemRole,
+			CreatedAt:  user.CreatedAt.Unix(),
 		},
 	}
 	c.JSON(consts.StatusOK, response.OK(resp))
@@ -220,10 +222,11 @@ func (h *UserHandler) GetUserInfo(ctx context.Context, c *app.RequestContext) {
 
 	resp := GetUserResponse{
 		User: UserProfile{
-			Id:        int64(user.ID),
-			Account:   user.Account,
-			Username:  user.Username,
-			CreatedAt: user.CreatedAt.Unix(),
+			Id:         int64(user.ID),
+			Account:    user.Account,
+			Username:   user.Username,
+			SystemRole: user.SystemRole,
+			CreatedAt:  user.CreatedAt.Unix(),
 		},
 	}
 	c.JSON(consts.StatusOK, response.OK(resp))

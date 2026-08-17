@@ -31,23 +31,28 @@ func (r *ContractRepo) CreateContract(ctx context.Context, contract *Contract) e
 	return nil
 }
 
-// GetContractByID 根据ID获取合同
-func (r *ContractRepo) GetContractByID(ctx context.Context, id uint64) (*Contract, error) {
+// GetContractByIDForAccount scopes a contract lookup to its owner. Returning
+// gorm.ErrRecordNotFound for both a missing and a foreign-owned contract avoids
+// leaking resource existence to another authenticated user.
+func (r *ContractRepo) GetContractByIDForAccount(ctx context.Context, id uint64, account string) (*Contract, error) {
 	var contract Contract
-	err := r.db.WithContext(ctx).First(&contract, id).Error
+	err := r.db.WithContext(ctx).
+		Where("id = ? AND account = ?", id, account).
+		First(&contract).Error
 	if err != nil {
-		global.Log.Error("ContractRepo.GetContractByID failed", zap.Error(err))
 		return nil, err
 	}
 	return &contract, nil
 }
 
-// GetContractByIDWithType 根据ID获取合同（包含类型信息）
-func (r *ContractRepo) GetContractByIDWithType(ctx context.Context, id uint64) (*Contract, error) {
+// GetContractByIDWithTypeForAccount scopes a typed contract lookup to its owner.
+func (r *ContractRepo) GetContractByIDWithTypeForAccount(ctx context.Context, id uint64, account string) (*Contract, error) {
 	var contract Contract
-	err := r.db.WithContext(ctx).Preload("ContractType").First(&contract, id).Error
+	err := r.db.WithContext(ctx).
+		Preload("ContractType").
+		Where("id = ? AND account = ?", id, account).
+		First(&contract).Error
 	if err != nil {
-		global.Log.Error("ContractRepo.GetContractByIDWithType failed", zap.Error(err))
 		return nil, err
 	}
 	return &contract, nil
@@ -154,12 +159,43 @@ func (r *ContractRepo) UpdateContractByID(ctx context.Context, id uint64, update
 	return nil
 }
 
+// UpdateContractByIDForAccount updates only a contract owned by account.
+func (r *ContractRepo) UpdateContractByIDForAccount(ctx context.Context, id uint64, account string, updates map[string]interface{}) error {
+	result := r.db.WithContext(ctx).
+		Model(&Contract{}).
+		Where("id = ? AND account = ?", id, account).
+		Updates(updates)
+	if result.Error != nil {
+		global.Log.Error("ContractRepo.UpdateContractByIDForAccount failed", zap.Error(result.Error))
+		return errors.New("update contract failed")
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
 // DeleteContract 删除合同
 func (r *ContractRepo) DeleteContract(ctx context.Context, id uint64) error {
 	err := r.db.WithContext(ctx).Delete(&Contract{}, id).Error
 	if err != nil {
 		global.Log.Error("ContractRepo.DeleteContract failed", zap.Error(err))
 		return errors.New("delete contract failed")
+	}
+	return nil
+}
+
+// DeleteContractForAccount deletes only a contract owned by account.
+func (r *ContractRepo) DeleteContractForAccount(ctx context.Context, id uint64, account string) error {
+	result := r.db.WithContext(ctx).
+		Where("id = ? AND account = ?", id, account).
+		Delete(&Contract{})
+	if result.Error != nil {
+		global.Log.Error("ContractRepo.DeleteContractForAccount failed", zap.Error(result.Error))
+		return errors.New("delete contract failed")
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
 	}
 	return nil
 }

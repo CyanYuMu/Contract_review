@@ -36,29 +36,13 @@ func NewSessionService(
 	}
 }
 
-// ResolveUserID 按账号查数字用户 ID。
-// 注意：鉴权中间件 GetCurrentUserID 返回的是 account 字符串（如 "debugtest"），
-// 不能直接 ParseUint（会得到 0），必须查 users 表解析为数字 ID。
-func (s *SessionService) ResolveUserID(ctx context.Context, account string) (uint64, error) {
-	if account == "" {
-		return 0, fmt.Errorf("未登录")
-	}
-	var userRecord struct {
-		ID uint `gorm:"column:id"`
-	}
-	if err := s.db.WithContext(ctx).Table("users").Select("id").Where("account = ?", account).First(&userRecord).Error; err != nil {
-		return 0, fmt.Errorf("用户不存在: %w", err)
-	}
-	return uint64(userRecord.ID), nil
-}
-
 // CreateSession 创建会话
 func (s *SessionService) CreateSession(ctx context.Context, account string, req *CreateSessionRequest) (*Session, error) {
 	// 验证关联合同文件
 	if req.FileID > 0 {
-		contractFile, err := s.contractRepo.GetContractByID(ctx, req.FileID)
+		contractFile, err := s.contractRepo.GetContractByIDForAccount(ctx, req.FileID, account)
 		if err != nil || contractFile == nil {
-			return nil, fmt.Errorf("关联的合同文件不存在")
+			return nil, fmt.Errorf("关联的合同文件不存在或无权访问")
 		}
 	}
 
@@ -88,9 +72,9 @@ func (s *SessionService) CreateSession(ctx context.Context, account string, req 
 	return session, nil
 }
 
-// GetSessionByID 根据ID获取会话
-func (s *SessionService) GetSessionByID(ctx context.Context, sessionID uint64) (*Session, error) {
-	return s.sessionRepo.GetByID(ctx, uint(sessionID))
+// GetSessionByID 根据ID和用户范围获取会话。
+func (s *SessionService) GetSessionByID(ctx context.Context, userID, sessionID uint64) (*Session, error) {
+	return s.sessionRepo.GetByIDAndUserID(ctx, uint(sessionID), uint(userID))
 }
 
 // ListSessions 获取用户会话列表
@@ -146,7 +130,7 @@ func (s *SessionService) listReviewSessions(ctx context.Context, userID uint64, 
 			PartyA:       sess.PartyA,
 			PartyB:       sess.PartyB,
 			FileName:     sess.FileName,
-			FilePath:     sess.FilePath,
+			FilePath:     contract.DownloadURL(uint64(sess.FileID)),
 			IsAccepted:   sess.IsAccepted,
 			ContractType: sess.ContractType,
 		})
@@ -176,13 +160,13 @@ func (s *SessionService) listCompareSessions(ctx context.Context, userID uint64,
 			PartyA1:     sess.PartyA1,
 			PartyB1:     sess.PartyB1,
 			FileName1:   sess.FileName1,
-			FilePath1:   sess.FilePath1,
+			FilePath1:   contract.DownloadURL(uint64(sess.FileID1)),
 			IsAccepted1: sess.IsAccepted1,
 			FileID2:     uint64(sess.FileID2),
 			PartyA2:     sess.PartyA2,
 			PartyB2:     sess.PartyB2,
 			FileName2:   sess.FileName2,
-			FilePath2:   sess.FilePath2,
+			FilePath2:   contract.DownloadURL(uint64(sess.FileID2)),
 			IsAccepted2: sess.IsAccepted2,
 			Similarity:  sess.Similarity,
 		})
@@ -208,7 +192,7 @@ func (s *SessionService) UpdateSessionTitle(ctx context.Context, userID, session
 		return nil, err
 	}
 
-	return s.sessionRepo.GetByID(ctx, uint(sessionID))
+	return s.sessionRepo.GetByIDAndUserID(ctx, uint(sessionID), uint(userID))
 }
 
 // DeleteSession 删除会话
@@ -249,9 +233,9 @@ func (s *SessionService) deleteReviewRelatedData(ctx context.Context, sessionID 
 	return nil
 }
 
-// GetSessionHistoryDetail 获取会话历史详情
-func (s *SessionService) GetSessionHistoryDetail(ctx context.Context, sessionID uint64) (*SessionHistoryDetailResponse, error) {
-	session, err := s.sessionRepo.GetByID(ctx, uint(sessionID))
+// GetSessionHistoryDetail 获取当前用户拥有的会话历史详情。
+func (s *SessionService) GetSessionHistoryDetail(ctx context.Context, userID, sessionID uint64) (*SessionHistoryDetailResponse, error) {
+	session, err := s.sessionRepo.GetByIDAndUserID(ctx, uint(sessionID), uint(userID))
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +249,7 @@ func (s *SessionService) GetSessionHistoryDetail(ctx context.Context, sessionID 
 	case SessionTypeReview:
 		data, err = s.getReviewHistoryData(ctx, session)
 	case SessionTypeCompare, SessionTypeCompareLegacy:
-		data, err = s.getCompareHistoryData(ctx, session)
+		data, err = s.getCompareHistoryData(ctx, session, userID)
 	default:
 		data = nil
 	}
@@ -333,7 +317,7 @@ func (s *SessionService) getReviewHistoryData(ctx context.Context, sess *Session
 }
 
 // getCompareHistoryData 获取比对历史数据
-func (s *SessionService) getCompareHistoryData(ctx context.Context, sess *Session) (map[string]interface{}, error) {
+func (s *SessionService) getCompareHistoryData(ctx context.Context, sess *Session, userID uint64) (map[string]interface{}, error) {
 	type compTaskRow struct {
 		ID               uint64  `gorm:"column:id"`
 		StandardFileID   uint64  `gorm:"column:standard_file_id"`
@@ -348,8 +332,14 @@ func (s *SessionService) getCompareHistoryData(ctx context.Context, sess *Sessio
 		return nil, errors.New("比对任务不存在")
 	}
 
-	stdFile, _ := s.contractRepo.GetContractByID(ctx, task.StandardFileID)
-	cmpFile, _ := s.contractRepo.GetContractByID(ctx, task.ComparisonFileID)
+	var owner struct {
+		Account string `gorm:"column:account"`
+	}
+	if err := s.db.WithContext(ctx).Table("users").Select("account").Where("id = ?", userID).First(&owner).Error; err != nil {
+		return nil, errors.New("会话所属用户不存在")
+	}
+	stdFile, _ := s.contractRepo.GetContractByIDForAccount(ctx, task.StandardFileID, owner.Account)
+	cmpFile, _ := s.contractRepo.GetContractByIDForAccount(ctx, task.ComparisonFileID, owner.Account)
 
 	var summary map[string]interface{}
 	var diffs []interface{}
@@ -377,7 +367,8 @@ func (s *SessionService) getCompareHistoryData(ctx context.Context, sess *Sessio
 			"file_id":      stdFile.ID,
 			"title":        stdFile.Title,
 			"file_type":    stdFile.FileType,
-			"file_path":    stdFile.FilePath,
+			"file_path":    contract.DownloadURL(stdFile.ID),
+			"file_url":     contract.DownloadURL(stdFile.ID),
 			"download_url": fmt.Sprintf("/api/contract/download/%d", stdFile.ID),
 		}
 	}
@@ -386,7 +377,8 @@ func (s *SessionService) getCompareHistoryData(ctx context.Context, sess *Sessio
 			"file_id":      cmpFile.ID,
 			"title":        cmpFile.Title,
 			"file_type":    cmpFile.FileType,
-			"file_path":    cmpFile.FilePath,
+			"file_path":    contract.DownloadURL(cmpFile.ID),
+			"file_url":     contract.DownloadURL(cmpFile.ID),
 			"download_url": fmt.Sprintf("/api/contract/download/%d", cmpFile.ID),
 		}
 	}

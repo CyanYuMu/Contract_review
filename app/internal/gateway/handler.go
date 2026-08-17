@@ -150,7 +150,7 @@ func (h *Handler) ListQuotas(ctx context.Context, c *app.RequestContext) {
 		c.JSON(consts.StatusOK, response.OK([]LLMQuota{}))
 		return
 	}
-	quotas, err := h.gw.repo.GetQuotas(ctx, userID)
+	quotas, err := h.gw.repo.ListQuotas(ctx, userID)
 	if err != nil {
 		c.JSON(consts.StatusInternalServerError, response.FailWithMsg("查询配额失败："+err.Error()))
 		return
@@ -160,7 +160,7 @@ func (h *Handler) ListQuotas(ctx context.Context, c *app.RequestContext) {
 
 // QuotaSetRequest 配额配置请求体
 type QuotaSetRequest struct {
-	SubjectType        string `json:"subject_type"`
+	SubjectType       string `json:"subject_type"`
 	SubjectID         uint64 `json:"subject_id"`
 	Feature           string `json:"feature"`
 	DailyTokenLimit   int    `json:"daily_token_limit"`
@@ -182,7 +182,7 @@ func (h *Handler) SetQuota(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	quota := &LLMQuota{
-		SubjectType:        req.SubjectType,
+		SubjectType:       req.SubjectType,
 		SubjectID:         req.SubjectID,
 		Feature:           req.Feature,
 		DailyTokenLimit:   req.DailyTokenLimit,

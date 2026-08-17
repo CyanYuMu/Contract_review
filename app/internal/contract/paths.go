@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -63,4 +64,13 @@ func StaticFileURL(storedPath string) string {
 		return ""
 	}
 	return "/api/static/" + filepath.Base(localPath)
+}
+
+// DownloadURL returns the authenticated API URL for a contract file. Contract
+// bytes must never be exposed through a public static directory.
+func DownloadURL(contractID uint64) string {
+	if contractID == 0 {
+		return ""
+	}
+	return fmt.Sprintf("/api/contract/download/%d", contractID)
 }

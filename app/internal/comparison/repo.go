@@ -43,6 +43,18 @@ func (r *ComparisonRepo) GetByID(ctx context.Context, id uint64) (*ComparisonTas
 	return &task, nil
 }
 
+func (r *ComparisonRepo) GetByIDAndUserID(ctx context.Context, id, userID uint64) (*ComparisonTask, error) {
+	var task ComparisonTask
+	err := r.db.WithContext(ctx).Where("id = ? AND user_id = ?", id, userID).First(&task).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &task, nil
+}
+
 // GetBySessionID 根据SessionID获取比对任务（单条）
 func (r *ComparisonRepo) GetBySessionID(ctx context.Context, sessionID uint64) (*ComparisonTask, error) {
 	var task ComparisonTask
@@ -52,6 +64,20 @@ func (r *ComparisonRepo) GetBySessionID(ctx context.Context, sessionID uint64) (
 			return nil, nil
 		}
 		global.Log.Error("ComparisonRepo.GetBySessionID failed", zap.Error(err))
+		return nil, err
+	}
+	return &task, nil
+}
+
+func (r *ComparisonRepo) GetBySessionIDAndUserID(ctx context.Context, sessionID, userID uint64) (*ComparisonTask, error) {
+	var task ComparisonTask
+	err := r.db.WithContext(ctx).
+		Where("session_id = ? AND user_id = ?", sessionID, userID).
+		First(&task).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return &task, nil

@@ -7,7 +7,6 @@ import (
 	"contract_review/app/internal/middleware/redis"
 	"contract_review/app/pkg/utils"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -45,19 +44,14 @@ func NewComparisonService(
 }
 
 // StartComparison 启动比对任务
-func (s *ComparisonService) StartComparison(ctx context.Context, account string, req *StartComparisonRequest) (*ComparisonTaskResponse, error) {
-	userID, err := s.resolveUserID(ctx, account)
-	if err != nil {
-		return nil, err
-	}
-
+func (s *ComparisonService) StartComparison(ctx context.Context, account string, userID uint64, req *StartComparisonRequest) (*ComparisonTaskResponse, error) {
 	// 1. 获取标准文档和比对文档
-	stdFile, err := s.contractRepo.GetContractByID(ctx, req.StandardFileID)
+	stdFile, err := s.contractRepo.GetContractByIDForAccount(ctx, req.StandardFileID, account)
 	if err != nil || stdFile == nil {
 		return nil, fmt.Errorf("标准文档不存在")
 	}
 
-	cmpFile, err := s.contractRepo.GetContractByID(ctx, req.ComparisonFileID)
+	cmpFile, err := s.contractRepo.GetContractByIDForAccount(ctx, req.ComparisonFileID, account)
 	if err != nil || cmpFile == nil {
 		return nil, fmt.Errorf("比对文档不存在")
 	}
@@ -84,7 +78,7 @@ func (s *ComparisonService) StartComparison(ctx context.Context, account string,
 	}
 
 	// 5. 创建或更新比对任务
-	task, err := s.comparisonRepo.GetBySessionID(ctx, sessionID)
+	task, err := s.comparisonRepo.GetBySessionIDAndUserID(ctx, sessionID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("获取比对任务失败: %w", err)
 	}
@@ -208,50 +202,40 @@ func (s *ComparisonService) buildFileInfo(c *contract.Contract) FileInfo {
 		FileID:      c.ID,
 		Title:       c.Title,
 		FileType:    c.FileType,
-		FilePath:    c.FilePath,
-		FileURL:     contract.StaticFileURL(c.FilePath),
+		FilePath:    contract.DownloadURL(c.ID),
+		FileURL:     contract.DownloadURL(c.ID),
 		DownloadURL: fmt.Sprintf("/api/contract/download/%d", c.ID),
 	}
 }
 
 // GetComparisonTask 获取比对任务
-func (s *ComparisonService) GetComparisonTask(ctx context.Context, taskID uint64) (*ComparisonTask, error) {
-	return s.comparisonRepo.GetByID(ctx, taskID)
+func (s *ComparisonService) GetComparisonTask(ctx context.Context, userID, taskID uint64) (*ComparisonTask, error) {
+	return s.comparisonRepo.GetByIDAndUserID(ctx, taskID, userID)
 }
 
 // GetComparisonTaskBySession 根据会话ID获取比对任务
-func (s *ComparisonService) GetComparisonTaskBySession(ctx context.Context, sessionID uint64) (*ComparisonTask, error) {
-	return s.comparisonRepo.GetBySessionID(ctx, sessionID)
+func (s *ComparisonService) GetComparisonTaskBySession(ctx context.Context, userID, sessionID uint64) (*ComparisonTask, error) {
+	return s.comparisonRepo.GetBySessionIDAndUserID(ctx, sessionID, userID)
 }
 
 // ListUserComparisonTasks 获取用户比对任务列表
-func (s *ComparisonService) ListUserComparisonTasks(ctx context.Context, account string, page, pageSize int) ([]ComparisonTask, int64, error) {
-	userID, err := s.resolveUserID(ctx, account)
-	if err != nil {
-		return nil, 0, err
-	}
+func (s *ComparisonService) ListUserComparisonTasks(ctx context.Context, account string, userID uint64, page, pageSize int) ([]ComparisonTask, int64, error) {
 	offset := (page - 1) * pageSize
 	return s.comparisonRepo.ListByUserID(ctx, userID, offset, pageSize)
 }
 
-func (s *ComparisonService) resolveUserID(ctx context.Context, account string) (uint64, error) {
-	var userRecord struct {
-		ID uint64 `gorm:"column:id"`
-	}
-	if err := s.db.WithContext(ctx).Table("users").Select("id").Where("account = ?", account).First(&userRecord).Error; err != nil {
-		return 0, fmt.Errorf("获取用户信息失败: %w", err)
-	}
-	return userRecord.ID, nil
-}
 
 // GetComparisonResult 获取比对结果详情
-func (s *ComparisonService) GetComparisonResult(ctx context.Context, taskID uint64) (*ComparisonTaskResponse, error) {
-	task, err := s.comparisonRepo.GetByID(ctx, taskID)
+func (s *ComparisonService) GetComparisonResult(ctx context.Context, userID, taskID uint64) (*ComparisonTaskResponse, error) {
+	task, err := s.comparisonRepo.GetByIDAndUserID(ctx, taskID, userID)
 	if err != nil {
 		return nil, err
 	}
 	if task == nil {
-		return nil, errors.New("比对任务不存在")
+		// Keep missing and foreign-owned tasks indistinguishable at the API
+		// boundary. Handlers can map this sentinel to HTTP 404 without
+		// disclosing whether a task exists for another user.
+		return nil, gorm.ErrRecordNotFound
 	}
 
 	// 解析保存的结果
@@ -271,8 +255,12 @@ func (s *ComparisonService) GetComparisonResult(ctx context.Context, taskID uint
 	}
 
 	// 获取文件信息
-	stdFile, _ := s.contractRepo.GetContractByID(ctx, task.StandardFileID)
-	cmpFile, _ := s.contractRepo.GetContractByID(ctx, task.ComparisonFileID)
+	var accountRecord struct {
+		Account string `gorm:"column:account"`
+	}
+	_ = s.db.WithContext(ctx).Table("users").Select("account").Where("id = ?", userID).First(&accountRecord).Error
+	stdFile, _ := s.contractRepo.GetContractByIDForAccount(ctx, task.StandardFileID, accountRecord.Account)
+	cmpFile, _ := s.contractRepo.GetContractByIDForAccount(ctx, task.ComparisonFileID, accountRecord.Account)
 
 	var stdFileInfo, cmpFileInfo FileInfo
 	if stdFile != nil {
@@ -294,6 +282,13 @@ func (s *ComparisonService) GetComparisonResult(ctx context.Context, taskID uint
 }
 
 // DeleteComparisonTask 删除比对任务
-func (s *ComparisonService) DeleteComparisonTask(ctx context.Context, taskID uint64) error {
+func (s *ComparisonService) DeleteComparisonTask(ctx context.Context, userID, taskID uint64) error {
+	task, err := s.comparisonRepo.GetByIDAndUserID(ctx, taskID, userID)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return gorm.ErrRecordNotFound
+	}
 	return s.comparisonRepo.Delete(ctx, taskID)
 }

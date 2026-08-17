@@ -3,6 +3,7 @@ export type User = {
     userId?: number;
     account?: string;
     username: string;
+    system_role?: 'member' | 'admin' | 'owner' | string;
     is_active?: boolean;
     permissions?: Record<string, boolean>;
 };

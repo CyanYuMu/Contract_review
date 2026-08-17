@@ -1,8 +1,20 @@
 package contract
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -12,6 +24,8 @@ import (
 	"contract_review/app/pkg/response"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type ContractHandler struct {
@@ -33,13 +47,14 @@ func NewContractHandler(contractService *ContractService) *ContractHandler {
 // @Success 200 {object} UploadContractResponse
 // @Router /api/contract/upload [post]
 func (ch *ContractHandler) UploadContractFile(ctx context.Context, c *app.RequestContext) {
-	// 1. 验证用户登录状态
-	account := middleware.GetCurrentUserID(c)
-	if account == "" {
+	// 1. 验证用户登录状态（ResourceScope 已由 ResolveScope 中间件解析）
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		global.Log.Error("未登录不能上传")
 		c.JSON(401, response.Unauthorized())
 		return
 	}
+	account := scope.Account
 
 	// 2. 获取上传的文件
 	file, err := c.FormFile("file")
@@ -49,33 +64,41 @@ func (ch *ContractHandler) UploadContractFile(ctx context.Context, c *app.Reques
 		return
 	}
 
-	// 3. 验证文件类型
-	ext := filepath.Ext(file.Filename)
+	// 3. 验证文件类型和内容
+	originalName := sanitizeFilename(file.Filename)
+	ext := strings.ToLower(filepath.Ext(originalName))
 	if ext != ".pdf" && ext != ".docx" && ext != ".txt" {
 		global.Log.Error("不支持的文件格式")
 		c.JSON(400, response.FailWithMsg("不支持的文件格式，仅支持 PDF、DOCX、TXT"))
 		return
 	}
+	if err := validateUploadedFile(file, ext); err != nil {
+		c.JSON(400, response.FailWithMsg(err.Error()))
+		return
+	}
 
 	// 4. 确保上传目录存在
 	uploadDir := UploadDir()
-	if err := os.MkdirAll(uploadDir, 0755); err != nil {
+	storageDir := filepath.Join(uploadDir, accountStorageDir(account))
+	if err := os.MkdirAll(storageDir, 0700); err != nil {
 		global.Log.Error("创建上传目录失败")
 		c.JSON(500, response.ServerError())
 		return
 	}
 
-	// 5. 保存文件到本地
-	savePath := filepath.Join(uploadDir, file.Filename)
+	// 5. 使用不可预测 object key 保存文件，原文件名只作为展示元数据。
+	savePath := filepath.Join(storageDir, uuid.NewString()+ext)
 	if err := c.SaveUploadedFile(file, savePath); err != nil {
 		global.Log.Error("保存文件失败")
 		c.JSON(500, response.ServerError())
 		return
 	}
+	_ = os.Chmod(savePath, 0600)
 
 	// 6. 调用服务层处理文件（提取文本、LLM解析、保存数据库）
-	contractDetail, err := ch.contractService.FileLoad(ctx, account, savePath, file.Filename)
+	contractDetail, err := ch.contractService.FileLoad(ctx, account, savePath, originalName)
 	if err != nil {
+		_ = os.Remove(savePath)
 		global.Log.Error("处理合同文件失败: " + err.Error())
 		c.JSON(500, response.FailWithMsg("处理合同文件失败："+err.Error()))
 		return
@@ -85,7 +108,7 @@ func (ch *ContractHandler) UploadContractFile(ctx context.Context, c *app.Reques
 	resp := UploadContractResponse{
 		FileID:         contractDetail.ID,
 		Title:          contractDetail.Title,
-		FilePathURL:    StaticFileURL(contractDetail.FilePath),
+		FilePathURL:    DownloadURL(contractDetail.ID),
 		FileType:       contractDetail.FileType,
 		ContractTypeID: contractDetail.TypeID,
 		PartyA:         contractDetail.PartyA,
@@ -105,11 +128,12 @@ func (ch *ContractHandler) UploadContractFile(ctx context.Context, c *app.Reques
 // @Success 200 {object} ContractListResponse
 // @Router /api/contract/list [get]
 func (ch *ContractHandler) ListContracts(ctx context.Context, c *app.RequestContext) {
-	account := middleware.GetCurrentUserID(c)
-	if account == "" {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		c.JSON(401, response.Unauthorized())
 		return
 	}
+	account := scope.Account
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
@@ -145,6 +169,12 @@ func (ch *ContractHandler) ListContracts(ctx context.Context, c *app.RequestCont
 // @Success 200 {object} response.Result
 // @Router /api/contract/:id/type [put]
 func (ch *ContractHandler) UpdateContractType(ctx context.Context, c *app.RequestContext) {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
+	account := scope.Account
 	idStr := c.Param("id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -158,7 +188,11 @@ func (ch *ContractHandler) UpdateContractType(ctx context.Context, c *app.Reques
 		return
 	}
 
-	if err := ch.contractService.UpdateContractTypeID(ctx, id, req.TypeID); err != nil {
+	if err := ch.contractService.UpdateContractTypeID(ctx, account, id, req.TypeID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(404, response.NotFound())
+			return
+		}
 		c.JSON(400, response.FailWithMsg(err.Error()))
 		return
 	}
@@ -174,6 +208,12 @@ func (ch *ContractHandler) UpdateContractType(ctx context.Context, c *app.Reques
 // @Success 200 {object} response.Result
 // @Router /api/contract/:id [delete]
 func (ch *ContractHandler) DeleteContract(ctx context.Context, c *app.RequestContext) {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
+	account := scope.Account
 	idStr := c.Param("id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -181,7 +221,11 @@ func (ch *ContractHandler) DeleteContract(ctx context.Context, c *app.RequestCon
 		return
 	}
 
-	if err := ch.contractService.DeleteContract(ctx, id); err != nil {
+	if err := ch.contractService.DeleteContract(ctx, account, id); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(404, response.NotFound())
+			return
+		}
 		c.JSON(500, response.FailWithMsg("删除合同失败"))
 		return
 	}
@@ -197,6 +241,12 @@ func (ch *ContractHandler) DeleteContract(ctx context.Context, c *app.RequestCon
 // @Success 200 {file} file
 // @Router /api/contract/:id/download [get]
 func (ch *ContractHandler) DownloadContract(ctx context.Context, c *app.RequestContext) {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
+	account := scope.Account
 	idStr := c.Param("id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -204,16 +254,148 @@ func (ch *ContractHandler) DownloadContract(ctx context.Context, c *app.RequestC
 		return
 	}
 
-	filePath, filename, err := ch.contractService.GetContractFilePath(ctx, id)
+	filePath, filename, fileType, err := ch.contractService.GetContractFilePath(ctx, account, id)
 	if err != nil {
 		c.JSON(404, response.FailWithMsg("文件不存在"))
 		return
 	}
 
-	// 设置响应头
-	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
-	c.Header("Content-Type", "application/octet-stream")
+	// 设置安全的下载响应头，避免原始名称中的 CRLF 注入。
+	filename = sanitizeFilename(filename)
+	encodedFilename := url.PathEscape(filename)
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s", filename, encodedFilename))
+	contentType := mime.TypeByExtension("." + strings.ToLower(strings.TrimPrefix(fileType, ".")))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	c.Header("Content-Type", contentType)
 	c.File(filePath)
+}
+
+const maxUploadSize int64 = 50 << 20
+
+func sanitizeFilename(filename string) string {
+	filename = filepath.Base(strings.TrimSpace(filename))
+	filename = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == '"' || r == '\\' {
+			return -1
+		}
+		return r
+	}, filename)
+	if filename == "" || filename == "." || filename == ".." {
+		return "contract"
+	}
+	return filename
+}
+
+func accountStorageDir(account string) string {
+	sum := sha256.Sum256([]byte(account))
+	return hex.EncodeToString(sum[:8])
+}
+
+func validateUploadedFile(file *multipart.FileHeader, ext string) error {
+	if file == nil || file.Size <= 0 {
+		return errors.New("文件不能为空")
+	}
+	if file.Size > maxUploadSize {
+		return fmt.Errorf("文件不能超过 %d MB", maxUploadSize/(1<<20))
+	}
+
+	reader, err := file.Open()
+	if err != nil {
+		return errors.New("无法读取上传文件")
+	}
+	defer reader.Close()
+
+	header := make([]byte, 512)
+	n, readErr := io.ReadFull(reader, header)
+	if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+		return errors.New("无法读取上传文件")
+	}
+	header = header[:n]
+	if len(header) == 0 {
+		return errors.New("文件不能为空")
+	}
+
+	switch ext {
+	case ".pdf":
+		if !bytes.HasPrefix(header, []byte("%PDF-")) {
+			return errors.New("文件内容不是有效的 PDF")
+		}
+	case ".docx":
+		if len(header) < 4 || header[0] != 'P' || header[1] != 'K' {
+			return errors.New("文件内容不是有效的 DOCX")
+		}
+		if err := validateDOCXArchive(file); err != nil {
+			return err
+		}
+	case ".txt":
+		if bytes.IndexByte(header, 0) >= 0 {
+			return errors.New("TXT 文件包含二进制内容")
+		}
+	}
+
+	_ = http.DetectContentType(header)
+	return nil
+}
+
+func validateDOCXArchive(file *multipart.FileHeader) error {
+	reader, err := file.Open()
+	if err != nil {
+		return errors.New("无法读取 DOCX 文件")
+	}
+	defer reader.Close()
+
+	readerAt, ok := reader.(io.ReaderAt)
+	if !ok {
+		return errors.New("无法校验 DOCX 文件结构")
+	}
+	return validateDOCXReader(readerAt, file.Size)
+}
+
+func validateDOCXReader(reader io.ReaderAt, size int64) error {
+	archive, err := zip.NewReader(reader, size)
+	if err != nil {
+		return errors.New("文件内容不是有效的 DOCX")
+	}
+	if len(archive.File) > 5000 {
+		return errors.New("DOCX 文件包含过多条目")
+	}
+
+	const (
+		maxEntrySize        = uint64(100 << 20)
+		maxUncompressedSize = uint64(200 << 20)
+	)
+	var totalSize uint64
+	hasContentTypes := false
+	hasDocument := false
+
+	for _, entry := range archive.File {
+		name := strings.ReplaceAll(entry.Name, "\\", "/")
+		cleanName := path.Clean(name)
+		if cleanName == ".." || strings.HasPrefix(cleanName, "../") || path.IsAbs(cleanName) {
+			return errors.New("DOCX 文件包含非法路径")
+		}
+		if entry.UncompressedSize64 > maxEntrySize {
+			return errors.New("DOCX 文件内部条目过大")
+		}
+		if totalSize > maxUncompressedSize-entry.UncompressedSize64 {
+			return errors.New("DOCX 文件解压后内容过大")
+		}
+		totalSize += entry.UncompressedSize64
+
+		switch cleanName {
+		case "[Content_Types].xml":
+			hasContentTypes = true
+		case "word/document.xml":
+			hasDocument = true
+		}
+	}
+
+	if !hasContentTypes || !hasDocument {
+		return errors.New("ZIP 文件不是有效的 DOCX 文档")
+	}
+	return nil
 }
 
 // ============ ContractType 相关接口 ============
@@ -239,7 +421,12 @@ func (ch *ContractHandler) CreateContractType(ctx context.Context, c *app.Reques
 		return
 	}
 
-	creator := middleware.GetCurrentUserID(c)
+	creatorScope, ok := middleware.GetScope(c)
+	if !ok {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
+	creator := creatorScope.Account
 	contractType, err := ch.contractService.CreateContractType(ctx, name, req.TemplateContent, creator)
 	if err != nil {
 		c.JSON(400, response.FailWithMsg(err.Error()))

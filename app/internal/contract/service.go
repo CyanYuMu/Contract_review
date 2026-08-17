@@ -115,10 +115,10 @@ func ParseAmount(amountStr string) float64 {
 
 // ============ Contract 相关服务 ============
 
-// FileLoad 上传并解析合同文件
-// 1. 提取文档文本
-// 2. 调用LLM解析合同信息
-// 3. 保存合同记录到数据库
+// FileLoad 上传并解析合同文件（异步版本）。
+// 1. 提取文档文本并持久化，审阅和QA不再重复提取。
+// 2. 立即保存 contract（status="processing"），HTTP 响应不等待 LLM。
+// 3. 后台 goroutine 调用 LLM 解析元数据（甲方/乙方/金额/合同类型），完成后更新。
 func (cs *ContractService) FileLoad(ctx context.Context, account string, filePath string, filename string) (Contract, error) {
 	global.Log.Info("开始处理合同文件",
 		zap.String("filePath", filePath),
@@ -139,70 +139,98 @@ func (cs *ContractService) FileLoad(ctx context.Context, account string, filePat
 
 	global.Log.Info("文档文本提取成功", zap.Int("contentLength", len(content)))
 
-	// 2. 调用LLM解析合同信息
-	raw, err := agent.LLMContractParse(ctx, content)
-	if err != nil {
-		global.Log.Error("LLM解析合同失败", zap.Error(err))
-		return Contract{}, errors.New("AI解析合同信息失败：" + err.Error())
-	}
-
-	global.Log.Info("LLM返回结果", zap.String("raw", raw))
-
-	// 3. 解析JSON响应
-	info, err := ParseContractInfo(raw)
-	if err != nil {
-		global.Log.Warn("解析合同信息JSON失败，使用默认值", zap.Error(err))
-		// 不完全失败，继续处理
-		info = ContractInfo{}
-	}
-
-	global.Log.Info("解析出的合同信息",
-		zap.String("partyA", info.PartyA),
-		zap.String("partyB", info.PartyB),
-		zap.String("amount", info.Amount),
-		zap.String("type", info.Type))
-
-	// 4. 金额标准化
-	amount := ParseAmount(info.Amount)
-
-	// 5. 获取文件类型
+	// 2. 获取文件类型和默认合同类型
 	fileType := utils.GetFileType(filename)
-
-	// 6. 尝试匹配合同类型；未匹配时使用默认类型，避免 type_id=0 触发外键失败。
-	typeID, err := cs.ensureContractTypeID(ctx, info.Type)
+	defaultType, err := cs.ensureDefaultContractType(ctx)
 	if err != nil {
-		global.Log.Error("获取合同类型失败", zap.Error(err))
-		return Contract{}, errors.New("保存合同类型失败：" + err.Error())
+		global.Log.Error("获取默认合同类型失败", zap.Error(err))
+		return Contract{}, errors.New("获取默认合同类型失败：" + err.Error())
 	}
 
-	// 7. 构建合同记录
+	// 3. 立即保存 contract（status=processing），不等待 LLM 元数据提取。
 	contract := Contract{
 		Account:    account,
-		TypeID:     typeID,
+		TypeID:     defaultType.ID,
 		Title:      limitString(filename, 256),
 		FilePath:   limitString(filePath, 512),
 		FileType:   limitString(fileType, 16),
+		RawText:    content,
 		UploadTime: time.Now(),
-		Status:     "uploaded",
-		PartyA:     limitString(info.PartyA, 128),
-		PartyB:     limitString(info.PartyB, 128),
-		Amount:     amount,
+		Status:     "processing",
+		PartyA:     "",
+		PartyB:     "",
+		Amount:     0,
 		IsAccepted: 0,
 	}
 
-	// 8. 保存到数据库
 	if err := cs.contractRepo.CreateContract(ctx, &contract); err != nil {
 		global.Log.Error("保存合同记录失败", zap.Error(err))
 		return Contract{}, errors.New("保存合同记录失败：" + err.Error())
 	}
 
-	global.Log.Info("合同文件处理完成",
+	global.Log.Info("合同记录已创建（元数据后台解析中）",
 		zap.Uint64("contractID", contract.ID),
-		zap.String("partyA", contract.PartyA),
-		zap.String("partyB", contract.PartyB),
-		zap.Float64("amount", contract.Amount))
+		zap.Int("textLength", len(content)))
+
+	// 4. 后台异步解析元数据
+	go cs.asyncParseMetadata(contract.ID, content)
 
 	return contract, nil
+}
+
+// asyncParseMetadata 在后台 goroutine 中调用 LLM 解析合同元数据，
+// 完成后更新 contracts 表的 party_a/party_b/amount/type_id/status 字段。
+// 解析失败时标记 status="parse_failed"，合同仍可用于审阅。
+func (cs *ContractService) asyncParseMetadata(contractID uint64, content string) {
+	bgCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	global.Log.Info("后台开始解析合同元数据", zap.Uint64("contractID", contractID))
+
+	raw, err := agent.LLMContractParse(bgCtx, content)
+	if err != nil {
+		global.Log.Error("后台LLM解析合同失败", zap.Uint64("contractID", contractID), zap.Error(err))
+		_ = cs.contractRepo.UpdateContractByID(bgCtx, contractID, map[string]interface{}{
+			"status": "parse_failed",
+		})
+		return
+	}
+
+	info, err := ParseContractInfo(raw)
+	if err != nil {
+		global.Log.Warn("后台解析合同信息JSON失败，使用默认值", zap.Uint64("contractID", contractID), zap.Error(err))
+		info = ContractInfo{}
+	}
+
+	amount := ParseAmount(info.Amount)
+	typeID, err := cs.ensureContractTypeID(bgCtx, info.Type)
+	if err != nil || typeID == 0 {
+		global.Log.Warn("后台获取合同类型失败，使用默认类型",
+			zap.Uint64("contractID", contractID), zap.Error(err))
+		if dt, dtErr := cs.ensureDefaultContractType(bgCtx); dtErr == nil && dt != nil {
+			typeID = dt.ID
+		}
+	}
+
+	updates := map[string]interface{}{
+		"party_a": limitString(info.PartyA, 128),
+		"party_b": limitString(info.PartyB, 128),
+		"amount":  amount,
+		"type_id": typeID,
+		"status":  "uploaded",
+	}
+
+	if err := cs.contractRepo.UpdateContractByID(bgCtx, contractID, updates); err != nil {
+		global.Log.Error("后台更新合同元数据失败", zap.Uint64("contractID", contractID), zap.Error(err))
+		return
+	}
+
+	global.Log.Info("后台合同元数据解析完成",
+		zap.Uint64("contractID", contractID),
+		zap.String("partyA", info.PartyA),
+		zap.String("partyB", info.PartyB),
+		zap.Float64("amount", amount),
+		zap.String("type", info.Type))
 }
 
 func (cs *ContractService) ensureContractTypeID(ctx context.Context, typeName string) (uint64, error) {
@@ -292,14 +320,14 @@ func limitString(value string, max int) string {
 	return string(runes[:max])
 }
 
-// GetContractByID 根据ID获取合同
-func (cs *ContractService) GetContractByID(ctx context.Context, id uint64) (*Contract, error) {
-	return cs.contractRepo.GetContractByID(ctx, id)
+// GetContractByIDForAccount returns a contract only when account owns it.
+func (cs *ContractService) GetContractByIDForAccount(ctx context.Context, account string, id uint64) (*Contract, error) {
+	return cs.contractRepo.GetContractByIDForAccount(ctx, id, account)
 }
 
-// GetContractByIDWithType 根据ID获取合同（包含类型信息）
-func (cs *ContractService) GetContractByIDWithType(ctx context.Context, id uint64) (*Contract, error) {
-	return cs.contractRepo.GetContractByIDWithType(ctx, id)
+// GetContractByIDWithTypeForAccount returns a typed contract only to its owner.
+func (cs *ContractService) GetContractByIDWithTypeForAccount(ctx context.Context, account string, id uint64) (*Contract, error) {
+	return cs.contractRepo.GetContractByIDWithTypeForAccount(ctx, id, account)
 }
 
 // GetContractsByAccount 获取用户的合同列表
@@ -325,7 +353,7 @@ func (cs *ContractService) UpdateContract(ctx context.Context, contract *Contrac
 }
 
 // UpdateContractTypeID 更新合同的类型ID
-func (cs *ContractService) UpdateContractTypeID(ctx context.Context, contractID uint64, typeID uint64) error {
+func (cs *ContractService) UpdateContractTypeID(ctx context.Context, account string, contractID uint64, typeID uint64) error {
 	// 验证类型是否存在
 	exists, err := cs.contractRepo.ExistsContractType(ctx, typeID)
 	if err != nil {
@@ -335,21 +363,21 @@ func (cs *ContractService) UpdateContractTypeID(ctx context.Context, contractID 
 		return errors.New("合同类型不存在")
 	}
 
-	return cs.contractRepo.UpdateContractByID(ctx, contractID, map[string]interface{}{
+	return cs.contractRepo.UpdateContractByIDForAccount(ctx, contractID, account, map[string]interface{}{
 		"type_id": typeID,
 	})
 }
 
 // DeleteContract 删除合同
-func (cs *ContractService) DeleteContract(ctx context.Context, id uint64) error {
+func (cs *ContractService) DeleteContract(ctx context.Context, account string, id uint64) error {
 	// 获取合同信息用于删除文件
-	contract, err := cs.contractRepo.GetContractByID(ctx, id)
+	contract, err := cs.contractRepo.GetContractByIDForAccount(ctx, id, account)
 	if err != nil {
 		return err
 	}
 
 	// 删除数据库记录
-	if err := cs.contractRepo.DeleteContract(ctx, id); err != nil {
+	if err := cs.contractRepo.DeleteContractForAccount(ctx, id, account); err != nil {
 		return err
 	}
 
@@ -365,19 +393,19 @@ func (cs *ContractService) DeleteContract(ctx context.Context, id uint64) error 
 }
 
 // GetContractFilePath 获取合同文件路径用于下载
-func (cs *ContractService) GetContractFilePath(ctx context.Context, id uint64) (string, string, error) {
-	contract, err := cs.contractRepo.GetContractByID(ctx, id)
+func (cs *ContractService) GetContractFilePath(ctx context.Context, account string, id uint64) (string, string, string, error) {
+	contract, err := cs.contractRepo.GetContractByIDForAccount(ctx, id, account)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
 	// 检查文件是否存在
 	filePath := LocalFilePath(contract.FilePath)
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		return "", "", errors.New("文件不存在")
+		return "", "", "", errors.New("文件不存在")
 	}
 
-	return filePath, contract.Title, nil
+	return filePath, contract.Title, contract.FileType, nil
 }
 
 // ============ ContractType 相关服务 ============

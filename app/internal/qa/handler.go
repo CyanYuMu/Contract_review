@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"time"
 
 	"contract_review/app/internal/global"
 	"contract_review/app/internal/middleware"
@@ -19,14 +20,20 @@ type QAHandler struct {
 	service *QAService
 }
 
+type qaStreamEvent struct {
+	delta string
+	msg   *QAMessage
+	err   error
+	done  bool
+}
+
 func NewQAHandler(service *QAService) *QAHandler { return &QAHandler{service: service} }
 
 // Ask 提问（SSE 流式响应）
 // POST /api/qa/ask  {session_id, message}
 func (h *QAHandler) Ask(ctx context.Context, c *app.RequestContext) {
-	account := middleware.GetCurrentUserID(c)
-	userID, err := h.service.ResolveUserID(ctx, account)
-	if err != nil {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		c.JSON(401, response.Unauthorized())
 		return
 	}
@@ -47,34 +54,64 @@ func (h *QAHandler) Ask(ctx context.Context, c *app.RequestContext) {
 	c.Response.Header.Set("Connection", "keep-alive")
 	c.Response.Header.Set("X-Accel-Buffering", "no")
 
-	// 流式回调：每收到一段 token 即推送 delta 事件
-	onDelta := func(delta string) {
-		h.sendSSE(c, SSEEventDelta, SSEDeltaData{Content: delta})
-	}
+	// 模型回调只写入事件通道，所有 HTTP 写操作都由当前 handler goroutine
+	// 串行完成，避免 token 回调和 heartbeat 并发写同一个响应。
+	events := make(chan qaStreamEvent, 128)
+	go func() {
+		msg, askErr := h.service.Ask(ctx, req.SessionID, scope.UserID, scope.Account, req.Message, func(delta string) {
+			select {
+			case events <- qaStreamEvent{delta: delta}:
+			case <-ctx.Done():
+			}
+		})
+		select {
+		case events <- qaStreamEvent{msg: msg, err: askErr, done: true}:
+		case <-ctx.Done():
+		}
+	}()
 
-	msg, err := h.service.Ask(ctx, req.SessionID, userID, account, req.Message, onDelta)
-	if err != nil {
-		global.Log.Error("合同问答失败", zap.Error(err))
-		h.sendSSE(c, SSEEventError, SSEErrorData{Message: err.Error()})
-		return
-	}
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 
-	// 结束事件
-	h.sendSSE(c, SSEEventEnd, SSEEndData{
-		MessageID: msg.ID,
-		Tokens:    msg.Tokens,
-	})
+	for {
+		select {
+		case event := <-events:
+			if !event.done {
+				h.sendSSE(c, SSEEventDelta, SSEDeltaData{Content: event.delta})
+				continue
+			}
+			if event.err != nil {
+				global.Log.Error("合同问答失败", zap.Error(event.err))
+				h.sendSSE(c, SSEEventError, SSEErrorData{Message: event.err.Error()})
+				return
+			}
+			if event.msg == nil {
+				h.sendSSE(c, SSEEventError, SSEErrorData{Message: "回答生成失败"})
+				return
+			}
+			h.sendSSE(c, SSEEventEnd, SSEEndData{
+				MessageID: event.msg.ID,
+				Tokens:    event.msg.Tokens,
+			})
+			return
+		case <-heartbeat.C:
+			c.Write([]byte(": ping\n\n"))
+			c.Flush()
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // GetMessages 获取会话消息历史
 // GET /api/qa/messages?session_id=&limit=
 func (h *QAHandler) GetMessages(ctx context.Context, c *app.RequestContext) {
-	account := middleware.GetCurrentUserID(c)
-	userID, err := h.service.ResolveUserID(ctx, account)
-	if err != nil {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		c.JSON(401, response.Unauthorized())
 		return
 	}
+
 	sessionID, _ := strconv.ParseUint(string(c.Query("session_id")), 10, 64)
 	if sessionID == 0 {
 		c.JSON(400, response.FailWithMsg("session_id 不能为空"))
@@ -84,7 +121,7 @@ func (h *QAHandler) GetMessages(ctx context.Context, c *app.RequestContext) {
 	if limit <= 0 {
 		limit = 50
 	}
-	msgs, err := h.service.ListMessages(ctx, sessionID, userID, limit)
+	msgs, err := h.service.ListMessages(ctx, sessionID, scope.UserID, limit)
 	if err != nil {
 		c.JSON(400, response.FailWithMsg(err.Error()))
 		return
@@ -95,12 +132,12 @@ func (h *QAHandler) GetMessages(ctx context.Context, c *app.RequestContext) {
 // ClearMessages 清空会话问答历史
 // POST /api/qa/clear  {session_id}
 func (h *QAHandler) ClearMessages(ctx context.Context, c *app.RequestContext) {
-	account := middleware.GetCurrentUserID(c)
-	userID, err := h.service.ResolveUserID(ctx, account)
-	if err != nil {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		c.JSON(401, response.Unauthorized())
 		return
 	}
+
 	var req struct {
 		SessionID uint64 `json:"session_id"`
 	}
@@ -108,7 +145,7 @@ func (h *QAHandler) ClearMessages(ctx context.Context, c *app.RequestContext) {
 		c.JSON(400, response.FailWithMsg("session_id 不能为空"))
 		return
 	}
-	if err := h.service.DeleteMessages(ctx, req.SessionID, userID); err != nil {
+	if err := h.service.DeleteMessages(ctx, req.SessionID, scope.UserID); err != nil {
 		c.JSON(400, response.FailWithMsg(err.Error()))
 		return
 	}

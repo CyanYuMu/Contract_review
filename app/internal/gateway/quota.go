@@ -17,7 +17,7 @@ func (g *Gateway) checkQuota(ctx context.Context, userID uint64, feature string)
 	if g.redis == nil || userID == 0 {
 		return nil
 	}
-	quotas, err := g.repo.GetQuotas(ctx, userID)
+	quotas, err := g.repo.GetQuotas(ctx, userID, feature)
 	if err != nil {
 		zap.L().Warn("查询配额配置失败，放行", zap.Error(err))
 		return nil

@@ -45,6 +45,18 @@ func (r *ReviewRepo) GetByID(ctx context.Context, id uint64) (*ReviewTask, error
 	return &task, nil
 }
 
+func (r *ReviewRepo) GetByIDAndUserID(ctx context.Context, id, userID uint64) (*ReviewTask, error) {
+	var task ReviewTask
+	err := r.db.WithContext(ctx).Where("id = ? AND user_id = ?", id, userID).First(&task).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &task, nil
+}
+
 // GetBySessionID 根据SessionID获取审阅任务（单条）
 func (r *ReviewRepo) GetBySessionID(ctx context.Context, sessionID uint64) (*ReviewTask, error) {
 	var task ReviewTask
@@ -54,6 +66,21 @@ func (r *ReviewRepo) GetBySessionID(ctx context.Context, sessionID uint64) (*Rev
 			return nil, nil
 		}
 		global.Log.Error("ReviewRepo.GetBySessionID failed", zap.Error(err))
+		return nil, err
+	}
+	return &task, nil
+}
+
+func (r *ReviewRepo) GetBySessionIDAndUserID(ctx context.Context, sessionID, userID uint64) (*ReviewTask, error) {
+	var task ReviewTask
+	err := r.db.WithContext(ctx).
+		Where("session_id = ? AND user_id = ?", sessionID, userID).
+		Order("id DESC").
+		First(&task).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return &task, nil

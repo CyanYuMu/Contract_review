@@ -29,6 +29,38 @@ func (r *UserRepo) CreateUser(ctx context.Context, user *User) error {
 	return nil
 }
 
+// EnsureSystemOwner prevents the administrative surface from becoming
+// permanently locked after introducing system_role. If no owner/admin exists,
+// the earliest user is promoted to owner. Repeated calls are idempotent.
+func (r *UserRepo) EnsureSystemOwner(ctx context.Context) error {
+	var privilegedCount int64
+	if err := r.db.WithContext(ctx).
+		Model(&User{}).
+		Where("system_role IN ?", []string{"owner", "admin"}).
+		Count(&privilegedCount).Error; err != nil {
+		return err
+	}
+	if privilegedCount > 0 {
+		return nil
+	}
+
+	var first User
+	if err := r.db.WithContext(ctx).
+		Select("id").
+		Order("id ASC").
+		First(&first).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	return r.db.WithContext(ctx).
+		Model(&User{}).
+		Where("id = ?", first.ID).
+		Update("system_role", "owner").Error
+}
+
 // GetUserByID 根据ID获取用户
 func (r *UserRepo) GetUserByID(ctx context.Context, id uint) (*User, error) {
 	var user User

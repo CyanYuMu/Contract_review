@@ -2,7 +2,7 @@
 
 import React, {useEffect, useState, useRef, useCallback} from 'react';
 import {Button, Input, Spin, Empty, Modal, Select, Tooltip, message} from 'antd';
-import {PlusOutlined, DeleteOutlined, SendOutlined, ClearOutlined} from '@ant-design/icons';
+import {PlusOutlined, DeleteOutlined, SendOutlined, ClearOutlined, StopOutlined} from '@ant-design/icons';
 import {useQAStore} from '@/store/qaStore';
 import {askQuestion, getQAMessages, clearQAMessages, getContractList} from '@/lib/api/qa';
 import {createSession} from '@/lib/api/createSession';
@@ -38,6 +38,13 @@ export default function QAPanel() {
     const [selectedFileId, setSelectedFileId] = useState<number | null>(null);
     const [creating, setCreating] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const activeRequestRef = useRef<{
+        sessionId: number;
+        generation: number;
+        controller: AbortController;
+    } | null>(null);
+    const requestGenerationRef = useRef(0);
+    const historyGenerationRef = useRef(0);
 
     // 加载问答会话列表
     const loadSessions = useCallback(async () => {
@@ -69,22 +76,49 @@ export default function QAPanel() {
 
     // 切换会话时加载历史消息
     const loadMessages = useCallback(async (sessionId: number) => {
+        const generation = ++historyGenerationRef.current;
         setLoadingMessages(true);
         try {
             const msgs = await getQAMessages(sessionId, 50);
+            if (
+                generation !== historyGenerationRef.current ||
+                useQAStore.getState().currentSessionId !== sessionId
+            ) {
+                return;
+            }
             setMessages(msgs);
         } catch {
+            if (
+                generation !== historyGenerationRef.current ||
+                useQAStore.getState().currentSessionId !== sessionId
+            ) {
+                return;
+            }
             message.error('加载问答历史失败');
             setMessages([]);
         } finally {
-            setLoadingMessages(false);
+            if (generation === historyGenerationRef.current) {
+                setLoadingMessages(false);
+            }
         }
     }, [setMessages]);
 
     useEffect(() => {
+        activeRequestRef.current?.controller.abort();
+        activeRequestRef.current = null;
+        requestGenerationRef.current += 1;
+        resetStreaming();
         if (currentSessionId) loadMessages(currentSessionId);
         else setMessages([]);
-    }, [currentSessionId, loadMessages, setMessages]);
+    }, [currentSessionId, loadMessages, resetStreaming, setMessages]);
+
+    useEffect(() => {
+        return () => {
+            activeRequestRef.current?.controller.abort();
+            activeRequestRef.current = null;
+            requestGenerationRef.current += 1;
+        };
+    }, []);
 
     // 流式输出时自动滚动到底部
     useEffect(() => {
@@ -149,12 +183,25 @@ export default function QAPanel() {
     const handleSend = async () => {
         const text = input.trim();
         if (!text || isStreaming || !currentSessionId) return;
+        const sessionId = currentSessionId;
+        const generation = ++requestGenerationRef.current;
+        const controller = new AbortController();
+        activeRequestRef.current = {sessionId, generation, controller};
+        const isActiveRequest = () => {
+            const active = activeRequestRef.current;
+            return Boolean(
+                active &&
+                active.sessionId === sessionId &&
+                active.generation === generation &&
+                !controller.signal.aborted
+            );
+        };
         setInput('');
 
         // 乐观追加用户消息
         appendMessage({
             id: Date.now(),
-            session_id: currentSessionId,
+            session_id: sessionId,
             role: 'user',
             content: text,
             tokens: 0,
@@ -164,13 +211,16 @@ export default function QAPanel() {
 
         try {
             await askQuestion(
-                {session_id: currentSessionId, message: text},
+                {session_id: sessionId, message: text},
                 {
-                    onDelta: (delta) => appendDelta(delta),
+                    onDelta: (delta) => {
+                        if (isActiveRequest()) appendDelta(delta);
+                    },
                     onEnd: (data) => {
+                        if (!isActiveRequest()) return;
                         appendMessage({
                             id: data.message_id || Date.now(),
-                            session_id: currentSessionId,
+                            session_id: sessionId,
                             role: 'assistant',
                             content: useQAStore.getState().streamingContent,
                             tokens: data.tokens,
@@ -179,15 +229,34 @@ export default function QAPanel() {
                         resetStreaming();
                     },
                     onError: (err) => {
+                        if (!isActiveRequest()) return;
                         message.error(err.message || '回答生成失败');
                         resetStreaming();
-                        if (currentSessionId) loadMessages(currentSessionId);
+                        loadMessages(sessionId);
                     },
-                }
+                },
+                controller.signal
             );
         } catch {
-            resetStreaming();
+            if (isActiveRequest()) {
+                resetStreaming();
+            }
+        } finally {
+            const active = activeRequestRef.current;
+            if (active?.sessionId === sessionId && active.generation === generation) {
+                activeRequestRef.current = null;
+            }
         }
+    };
+
+    const handleStop = () => {
+        const active = activeRequestRef.current;
+        if (!active) return;
+        active.controller.abort();
+        activeRequestRef.current = null;
+        requestGenerationRef.current += 1;
+        resetStreaming();
+        message.info('已停止生成');
     };
 
     // 清空当前会话历史
@@ -305,15 +374,20 @@ export default function QAPanel() {
                                     disabled={isStreaming}
                                     className="flex-1"
                                 />
-                                <Button
-                                    type="primary"
-                                    icon={<SendOutlined/>}
-                                    onClick={handleSend}
-                                    disabled={!input.trim() || isStreaming}
-                                    loading={isStreaming}
-                                >
-                                    发送
-                                </Button>
+                                {isStreaming ? (
+                                    <Button danger icon={<StopOutlined/>} onClick={handleStop}>
+                                        停止
+                                    </Button>
+                                ) : (
+                                    <Button
+                                        type="primary"
+                                        icon={<SendOutlined/>}
+                                        onClick={handleSend}
+                                        disabled={!input.trim()}
+                                    >
+                                        发送
+                                    </Button>
+                                )}
                             </div>
                         </div>
                     </>

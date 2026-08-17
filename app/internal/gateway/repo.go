@@ -35,11 +35,22 @@ func (r *Repo) ListRoutes(ctx context.Context) ([]LLMRoute, error) {
 	return routes, err
 }
 
-// GetQuotas 查询配额（user 维度 + 通配 feature=NULL）
-func (r *Repo) GetQuotas(ctx context.Context, userID uint64) ([]LLMQuota, error) {
+// GetQuotas 查询某个 feature 生效的配额（精确 feature + 通配配置）。
+func (r *Repo) GetQuotas(ctx context.Context, userID uint64, feature string) ([]LLMQuota, error) {
 	var quotas []LLMQuota
 	err := r.db.WithContext(ctx).
-		Where("subject_type = ? AND subject_id = ? AND (feature IS NULL OR feature = ?)", "user", userID, "").
+		Where("subject_type = ? AND subject_id = ? AND (feature IS NULL OR feature = '' OR feature = ?)",
+			"user", userID, feature).
+		Find(&quotas).Error
+	return quotas, err
+}
+
+// ListQuotas returns all quota rows for administrative inspection.
+func (r *Repo) ListQuotas(ctx context.Context, userID uint64) ([]LLMQuota, error) {
+	var quotas []LLMQuota
+	err := r.db.WithContext(ctx).
+		Where("subject_type = ? AND subject_id = ?", "user", userID).
+		Order("feature ASC, id ASC").
 		Find(&quotas).Error
 	return quotas, err
 }

@@ -1,9 +1,9 @@
 # 合同审阅智能体技术优化 Spec
 
 > Spec ID：CR-ARCH-001
-> 版本：v1.0.0-draft
-> 状态：Draft / 待评审
-> 基线日期：2026-08-11
+> 版本：v1.2.0-draft
+> 状态：Implementing / Phase 0 收尾完成，Phase 1 待启动
+> 基线日期：2026-08-12
 > 当前代码基线：main@2361cdd，加上本地未提交改动
 > 适用范围：Contract_review 前端、后端、RAG、模型网关、合同问答与运行基础设施
 > 维护方式：本文档既是目标架构，也是后续实施、验收、ADR 与迭代进度的唯一入口
@@ -211,6 +211,15 @@ flowchart LR
 | GW-05 | P1 | 用量日志缺 run/step/prompt/snapshot 关联 | gateway usage model | 成本无法归因到具体审阅阶段 | Phase 2/5 |
 | QUALITY-01 | P1 | QualityGate 主要依赖另一次 LLM 打分 | agent/quality_gate.go 与 orchestrator | 无确定性质量保证，无法用 gold set 校准 | Phase 3 |
 | QUALITY-02 | P1 | 总体风险算法不统一 | handler 和 Agent report 使用不同逻辑 | 同一结果可能展示不同整体风险 | Phase 2 |
+
+### 5.1 问题实施状态（v1.2.0-draft）
+
+- 已完成首批代码修复：SEC-01、SEC-02、SEC-03、SEC-04、RUN-01、QA-01、QA-02、QA-03、GW-01。
+- 已完成 Phase 0 剩余架构项：统一 `ResourceScope`（`app/internal/middleware/scope.go`，含 Redis 缓存 identity resolver），重构 5 个模块（contract/review/qa/session/comparison）handler 和 service 的 identity 解析路径，消除 4 份重复 `ResolveUserID` 实现；IDOR 集成测试覆盖合同、会话、审阅、QA 和比对跨用户隔离（`idor_integration_test.go`，build tag `//go:build integration`）。
+- 部分完成：SEC-05 已有大小、类型、魔数、DOCX ZIP 结构、解压上限和路径穿越防护，但病毒扫描仍未接入。
+- 临时缓解但未关闭：RUN-02 已使进程内审阅不随浏览器断线立即取消，但服务重启恢复、事件重放和跨实例接管仍未实现，因此问题继续保持 Open 并归入 Phase 2。
+- 仍保持 Open：RUN-03、RUN-04、DATA-01/02、INGEST、RAG、QA-04、FE、GW-02 至 GW-05、QUALITY 系列。
+- Phase 0 完整退出条件：仅病毒扫描（SEC-05）待 ClamAV 或云端服务组件接入后关闭；其余代码项均已通过编译、单元测试和 go vet 验证。
 
 ---
 
@@ -1539,16 +1548,20 @@ Phase 5：
 
 工作项：
 
-- [ ] 为 contract/review/session/QA 增加资源归属查询和测试。
-- [ ] 为 risk config、model config、gateway routes/quotas 增加 admin guard。
-- [ ] 文件名改 UUID/object key，校验扩展名、MIME、魔数、大小。
-- [ ] 移除公开 static 文件访问，改鉴权下载。
-- [ ] Orchestrator callback 改为 run 参数。
-- [ ] 使用 go test -race 覆盖两个并发审阅。
-- [ ] QA 最终答案语义缓存默认禁用或完整隔离。
-- [ ] 修复 GetQuotas feature 查询。
-- [ ] QA SSE 增加 heartbeat、AbortController、未收到 end 的断流错误。
-- [ ] 增加 IDOR、安全上传和跨流污染回归测试。
+- [x] contract/review/session/comparison/QA 公共调用链按当前用户归属查询；foreign 与 missing 资源统一隐藏为 404。
+- [x] risk config、model config、gateway routes/quotas 等管理接口增加数据库 `system_role` admin guard。
+- [x] 前端设置布局读取 `/user/me.system_role`，member/匿名用户不挂载管理页面并重定向到“关于我们”；owner/admin 才展示管理菜单。
+- [x] 文件名改 UUID/object key，限制 50 MB，并校验扩展名、MIME、魔数和 DOCX ZIP 结构。
+- [x] 移除后端公开 static 文件访问和 Next.js 本地文件 fallback，改为 bearer 鉴权下载与二进制流直通。
+- [x] Orchestrator callback 改为每次 run 参数，共享编排器不再保存运行期可变 callback。
+- [x] 使用 `go test -race` 覆盖两个并发审阅的 callback 隔离。
+- [x] QA 与 review 最终答案语义缓存默认禁用，阻断当前 cache key 不完整造成的跨合同污染。
+- [x] 修复 `GetQuotas` feature 查询，同时拆分运行期 feature 查询与管理列表查询。
+- [x] QA SSE 增加 heartbeat、AbortController、请求 generation、停止按钮和未收到 end 的断流错误。
+- [x] 增加安全上传、DOCX ZIP traversal、答案缓存策略和并发 callback 单元测试。
+- [x] 增加基于真实测试数据库的双用户 IDOR 集成测试，覆盖合同、会话、审阅、比对和下载（`app/internal/middleware/idor_integration_test.go`，build tag `//go:build integration`，通过 `CONTRACT_REVIEW_TEST_DSN` 环境变量注入）。
+- [ ] 接入病毒扫描或隔离区扫描流程；扫描完成前文件不可进入解析和审阅。
+- [x] 将当前 user/account scope 抽象为统一 `ResourceScope`，并为 organization_id 与组织角色预留迁移路径（`app/internal/middleware/scope.go`）。
 
 退出条件：
 
@@ -1556,6 +1569,26 @@ Phase 5：
 - 50 组并发双审阅测试无回调串流，race detector 通过。
 - QA 不可能命中其他合同或其他用户答案。
 - 普通用户无法管理模型、路由和配额。
+
+#### Phase 0 Batch 1 实施结果（2026-08-11）
+
+本批次已经完成最紧急的代码级安全与并发门禁，并保留以下边界：
+
+- 审阅在浏览器或代理断开后使用最长 30 分钟的独立进程内 context 继续运行。这是 Phase 0 临时止血方案，不具备服务重启恢复、事件重放和跨实例接管能力；正式方案仍由 Phase 2 的 durable review run/event store 完成。
+- 旧 `/api/static/...` URL 不再提供本地文件 fallback，可能返回 404。若需兼容历史数据，只能实现“登录用户 + 数据库 file_path + owner scope”校验的 legacy adapter，不能恢复按 basename 直接读盘。
+- 数据库 `system_role` 是管理权限权威来源；JWT role 仅可作为前端显示提示。启动和新用户创建后会幂等确保系统至少存在一个 owner/admin，避免管理接口永久锁死。
+- review 与 QA 的语义答案缓存暂时整体关闭。后续只有在 cache key 完整包含 organization、user、contract_version、knowledge_snapshot、prompt_version 和 model policy 后才允许重新开启。
+- 当前 quota 已能按 feature 正确查询，但“检查 + 扣减”仍非原子事务，原子 reservation/commit/release 留在 Phase 5。
+
+验证记录：
+
+- `GOCACHE=/private/tmp/contract-review-gocache go test ./...`：通过。
+- `go test -race ./app/internal/agent ./app/internal/contract ./app/internal/gateway`：通过。
+- `npm run build`：通过，Next.js 生产构建和 TypeScript 校验成功。
+- 本批次前端文件定向 ESLint：0 error；仓库全量 lint 仍受历史文件错误和 vendor worker warnings 影响。
+- `git diff --check`：通过。
+
+尚未满足的 Phase 0 完整退出条件：病毒扫描（需 ClamAV 或云端服务接入）。
 
 ### Phase 1：统一合同资产与异步解析
 
@@ -1854,6 +1887,13 @@ Phase 5：
 - 决策：只有 published knowledge_version 可进入 snapshot，run 固定 snapshot。
 - 原因：法规和内部规则会变化，历史结论必须可复现。
 
+### ADR-008：统一 ResourceScope 作为请求级身份载体
+
+- 状态：Accepted（2026-08-12）
+- 决策：引入 `middleware.ResourceScope` 统一体（OrganizationID / UserID / Account / SystemRole），通过 `ResolveScope` 中间件一次解析并缓存到 Redis（120s TTL），handler 与 service 通过 `GetScope` 获取后传递 `scope.Account` / `scope.UserID` 给 repo 层，消除 5 个模块各做一份的 account→userID 解析。
+- 原因：消除 4 份重复 `ResolveUserID` 实现（qa/review/session + comparison 私有），统一 contracts 表的 account 字符串隔离与新表 user_id 数字隔离的 owner 键差异，为 Phase 1 的 contracts.account→owner_user_id 迁移和 organization 字段预留路径。
+- 影响：31 个 handler 调用点从 `GetCurrentUserID` + `ResolveUserID` 两步收敛为 `GetScope` 一步；管理守卫 `RequireSystemRole` 保持每次权威 DB 查询，不受 scope 缓存影响。
+
 ---
 
 ## 25. 实施检查表
@@ -1901,14 +1941,16 @@ Phase 5：
 | 日期 | 版本 | 变更 | 关联 issue/PR | 决策人 |
 | --- | --- | --- | --- | --- |
 | 2026-08-11 | v1.0.0-draft | 初始版本，完成现状诊断、目标架构和 Phase 0-5 路线图 | 待补充 | 待补充 |
+| 2026-08-11 | v1.1.0-draft | Phase 0 Batch 1：资源归属、管理权限及前端镜像、私有文件、安全上传、Orchestrator 并发隔离、QA 流可靠性、缓存与 feature quota 修复，并记录验证结果和剩余门禁 | 本地未提交实现 | Codex + 项目维护者待确认 |
+| 2026-08-12 | v1.2.0-draft | Phase 0 收尾：统一 ResourceScope 抽象（消除 4 份重复 ResolveUserID，handler→service 身份解析收敛为 scopeMW 单点缓存），5 模块 identity 路径重构（contract/review/qa/session/comparison），双用户 IDOR 集成测试 12 项覆盖（合同/会话/审阅/QA/比对跨用户读/写/删/列），新增 ADR-008 | 本地未提交实现 | Codex + 项目维护者待确认 |
 
 ### 26.4 实施进度模板
 
 | Phase | 状态 | 已完成 | 阻塞 | 下一步 | 最后更新 |
 | --- | --- | --- | --- | --- | --- |
-| Phase 0 | Not Started | - | - | 资源守卫与 Orchestrator 并发修复 | 2026-08-11 |
+| Phase 0 | Implemented | 首批 user scope、admin guard/前端镜像、私有下载、安全上传、callback 隔离、QA 流、cache/quota 修复与验证、统一 ResourceScope、IDOR 集成测试 | 仅病毒扫描（SEC-05）待 ClamAV 接入 | 病毒扫描接入 | 2026-08-12 |
 | Phase 1 | Not Started | - | - | 等待 Phase 0 | 2026-08-11 |
-| Phase 2 | Not Started | - | - | 等待数据模型评审 | 2026-08-11 |
+| Phase 2 | Not Started | 审阅断线继续已有进程内临时方案 | 尚无 durable worker/event store | 评审 review run、event、outbox 数据模型 | 2026-08-11 |
 | Phase 3 | Not Started | - | - | 等待 snapshot 设计 | 2026-08-11 |
 | Phase 4 | Not Started | - | - | 等待 v2 API | 2026-08-11 |
 | Phase 5 | Not Started | - | - | 等待运行数据基线 | 2026-08-11 |

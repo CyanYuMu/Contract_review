@@ -35,10 +35,10 @@ func NewQAService(db *gorm.DB, contractService *contract.ContractService) *QASer
 
 // sessionInfo 会话最小信息
 type sessionInfo struct {
-	ID          uint64
-	UserID      uint64
-	FileID      uint64
-	Title       string
+	ID     uint64
+	UserID uint64
+	FileID uint64
+	Title  string
 }
 
 // getSession 校验会话归属并返回会话信息
@@ -95,12 +95,15 @@ func (s *QAService) Ask(ctx context.Context, sessionID, userID uint64, account, 
 	}
 
 	// 2. 读取合同内容
-	contractInfo, err := s.contractService.GetContractByIDWithType(ctx, sess.FileID)
+	contractInfo, err := s.contractService.GetContractByIDWithTypeForAccount(ctx, account, sess.FileID)
 	if err != nil || contractInfo == nil {
 		return nil, fmt.Errorf("获取合同信息失败: %w", err)
 	}
+	// 优先使用已持久化的提取文本（上传时已提取），避免每次 QA 请求重复解析文件
 	contractText := ""
-	if contractInfo.FilePath != "" {
+	if contractInfo.RawText != "" {
+		contractText = contractInfo.RawText
+	} else if contractInfo.FilePath != "" {
 		contractText, err = utils.ExtractText(contract.LocalFilePath(contractInfo.FilePath))
 		if err != nil {
 			return nil, fmt.Errorf("读取合同内容失败: %w", err)
@@ -213,9 +216,9 @@ func retrieveContractChunks(contractText, question string) string {
 	ragChunks := make([]rag.Chunk, 0, len(chunks))
 	for i, c := range chunks {
 		ragChunks = append(ragChunks, rag.Chunk{
-			ID:      fmt.Sprintf("contract-%d", i),
-			DocID:   "contract",
-			Content: c,
+			ID:       fmt.Sprintf("contract-%d", i),
+			DocID:    "contract",
+			Content:  c,
 			Metadata: map[string]string{"chunk_index": fmt.Sprintf("%d", i)},
 		})
 	}
@@ -330,20 +333,3 @@ func (s *QAService) DeleteMessages(ctx context.Context, sessionID, userID uint64
 	return s.repo.DeleteBySession(ctx, sessionID)
 }
 
-// ResolveUserID 按账号查数字用户 ID（鉴权中间件拿到的是 account 字符串）
-func (s *QAService) ResolveUserID(ctx context.Context, account string) (uint64, error) {
-	if account == "" {
-		return 0, fmt.Errorf("未登录")
-	}
-	// 注意：不能以标量（*uint64）作为 First 的目标，GORM 的 First 会追加
-	// ORDER BY 主键，需要 schema 才能解析主键列；标量目标 schema 为 nil 会触发
-	// ErrModelValueRequired("model value required")。改用结构体目标，与
-	// review/comparison/session 三个服务保持一致。
-	var userRecord struct {
-		ID uint64 `gorm:"column:id"`
-	}
-	if err := s.db.WithContext(ctx).Table("users").Select("id").Where("account = ?", account).First(&userRecord).Error; err != nil {
-		return 0, fmt.Errorf("用户不存在: %w", err)
-	}
-	return userRecord.ID, nil
-}

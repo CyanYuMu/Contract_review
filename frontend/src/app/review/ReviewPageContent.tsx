@@ -30,6 +30,7 @@ import ContractContrastPanel from "@/components/contrast/ContractContrastPanel";
 import {authDatedHandler} from "@/utils/authDatedHandler";
 import { buildStaticFileUrl } from '@/utils/url';
 import {waitFor} from "@/utils/waitFor";
+import {getAuthToken} from "@/utils/client";
 
 function readStoredReviewUploadData(): UploadData | null {
     if (typeof window === "undefined") return null;
@@ -218,7 +219,10 @@ export default function ReviewPageContent() {
                 // console.log("代理地址为：",proxy_url)
                 console.log("原始文件路径：",file_url)
                 const proxyUrl = buildStaticFileUrl(file_url); 
-                const response=await fetch(proxyUrl)
+                const token = getAuthToken();
+                const response = await fetch(proxyUrl, {
+                    headers: token ? {Authorization: 'Bearer ' + token} : undefined,
+                });
            
                 // const response = await fetch(file_url);
                 if (!response.ok) {

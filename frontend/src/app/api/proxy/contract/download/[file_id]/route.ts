@@ -21,15 +21,26 @@ export async function GET(
     const { file_id } = await context.params;
     const upstreamUrl = `${base}/api/contract/download/${file_id}`;
     const auth = request.headers.get("authorization");
+    if (!auth) {
+        return new Response("Unauthorized", {
+            status: 401,
+            headers: {
+                "cache-control": "private, no-store",
+            },
+        });
+    }
 
     const upstream = await fetch(upstreamUrl, {
         method: "GET",
-        headers: auth ? { Authorization: auth } : undefined,
+        headers: { Authorization: auth },
+        signal: request.signal,
     });
 
+    const headers = pickHeaders(upstream.headers);
+    headers.set("cache-control", "private, no-store");
     return new Response(upstream.body, {
         status: upstream.status,
         statusText: upstream.statusText,
-        headers: pickHeaders(upstream.headers),
+        headers,
     });
 }

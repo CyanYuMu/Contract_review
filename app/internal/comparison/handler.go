@@ -5,10 +5,12 @@ import (
 	"contract_review/app/internal/global"
 	"contract_review/app/internal/middleware"
 	"contract_review/app/pkg/response"
+	"errors"
 	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // ComparisonHandler 比对处理器
@@ -33,8 +35,8 @@ func NewComparisonHandler(comparisonService *ComparisonService) *ComparisonHandl
 // @Router /api/comparison/start [post]
 func (h *ComparisonHandler) StartComparison(ctx context.Context, c *app.RequestContext) {
 	// 1. 验证用户登录状态
-	account := middleware.GetCurrentUserID(c)
-	if account == "" {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		global.Log.Error("用户未登录")
 		c.JSON(401, response.Unauthorized())
 		return
@@ -55,7 +57,7 @@ func (h *ComparisonHandler) StartComparison(ctx context.Context, c *app.RequestC
 	}
 
 	// 4. 调用服务层执行比对
-	result, err := h.comparisonService.StartComparison(ctx, account, &req)
+	result, err := h.comparisonService.StartComparison(ctx, scope.Account, scope.UserID, &req)
 	if err != nil {
 		global.Log.Error("比对任务执行失败", zap.Error(err))
 		c.JSON(500, response.FailWithMsg(err.Error()))
@@ -73,6 +75,12 @@ func (h *ComparisonHandler) StartComparison(ctx context.Context, c *app.RequestC
 // @Success 200 {object} ComparisonTaskResponse
 // @Router /api/comparison/task/:id [get]
 func (h *ComparisonHandler) GetComparisonTask(ctx context.Context, c *app.RequestContext) {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
+	userID := scope.UserID
 	idStr := c.Param("id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -80,8 +88,12 @@ func (h *ComparisonHandler) GetComparisonTask(ctx context.Context, c *app.Reques
 		return
 	}
 
-	result, err := h.comparisonService.GetComparisonResult(ctx, id)
+	result, err := h.comparisonService.GetComparisonResult(ctx, userID, id)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(404, response.NotFound())
+			return
+		}
 		c.JSON(500, response.ServerError())
 		return
 	}
@@ -101,6 +113,12 @@ func (h *ComparisonHandler) GetComparisonTask(ctx context.Context, c *app.Reques
 // @Success 200 {object} ComparisonTaskResponse
 // @Router /api/comparison/task/session [get]
 func (h *ComparisonHandler) GetComparisonTaskBySession(ctx context.Context, c *app.RequestContext) {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
+	userID := scope.UserID
 	sessionIDStr := c.Query("session_id")
 	sessionID, err := strconv.ParseUint(sessionIDStr, 10, 64)
 	if err != nil {
@@ -108,7 +126,7 @@ func (h *ComparisonHandler) GetComparisonTaskBySession(ctx context.Context, c *a
 		return
 	}
 
-	task, err := h.comparisonService.GetComparisonTaskBySession(ctx, sessionID)
+	task, err := h.comparisonService.GetComparisonTaskBySession(ctx, userID, sessionID)
 	if err != nil {
 		c.JSON(500, response.ServerError())
 		return
@@ -118,8 +136,12 @@ func (h *ComparisonHandler) GetComparisonTaskBySession(ctx context.Context, c *a
 		return
 	}
 
-	result, err := h.comparisonService.GetComparisonResult(ctx, task.ID)
+	result, err := h.comparisonService.GetComparisonResult(ctx, userID, task.ID)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(404, response.NotFound())
+			return
+		}
 		c.JSON(500, response.ServerError())
 		return
 	}
@@ -136,8 +158,8 @@ func (h *ComparisonHandler) GetComparisonTaskBySession(ctx context.Context, c *a
 // @Success 200 {object} ComparisonTaskListResponse
 // @Router /api/comparison/tasks [get]
 func (h *ComparisonHandler) ListComparisonTasks(ctx context.Context, c *app.RequestContext) {
-	account := middleware.GetCurrentUserID(c)
-	if account == "" {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		c.JSON(401, response.Unauthorized())
 		return
 	}
@@ -152,7 +174,7 @@ func (h *ComparisonHandler) ListComparisonTasks(ctx context.Context, c *app.Requ
 		pageSize = 10
 	}
 
-	tasks, total, err := h.comparisonService.ListUserComparisonTasks(ctx, account, page, pageSize)
+	tasks, total, err := h.comparisonService.ListUserComparisonTasks(ctx, scope.Account, scope.UserID, page, pageSize)
 	if err != nil {
 		c.JSON(500, response.ServerError())
 		return
@@ -179,6 +201,12 @@ func (h *ComparisonHandler) ListComparisonTasks(ctx context.Context, c *app.Requ
 // @Success 200 {object} response.Result
 // @Router /api/comparison/task/:id [delete]
 func (h *ComparisonHandler) DeleteComparisonTask(ctx context.Context, c *app.RequestContext) {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
+	userID := scope.UserID
 	idStr := c.Param("id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -186,13 +214,18 @@ func (h *ComparisonHandler) DeleteComparisonTask(ctx context.Context, c *app.Req
 		return
 	}
 
-	if err := h.comparisonService.DeleteComparisonTask(ctx, id); err != nil {
+	if err := h.comparisonService.DeleteComparisonTask(ctx, userID, id); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(404, response.NotFound())
+			return
+		}
 		c.JSON(500, response.FailWithMsg("删除任务失败"))
 		return
 	}
 
 	c.JSON(200, response.Ok())
 }
+
 
 // ============ 辅助方法 ============
 

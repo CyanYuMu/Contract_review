@@ -1,10 +1,11 @@
 package config
 
 import (
-	"github.com/spf13/viper"
-	"go.uber.org/zap"
+	"fmt"
 	"os"
 	"sync"
+
+	"github.com/spf13/viper"
 )
 
 type Server struct {
@@ -147,12 +148,14 @@ func GetConfig() *Config {
 		v.SetConfigType("yaml")
 
 		if err := v.ReadInConfig(); err != nil {
-			zap.S().Fatalf("读取配置文件失败: %v", err)
+			fmt.Fprintf(os.Stderr, "读取配置文件失败: %v\n", err)
+			os.Exit(1)
 		}
 
 		config = &Config{}
 		if err := v.Unmarshal(config); err != nil {
-			zap.S().Fatalf("解析配置文件失败: %v", err)
+			fmt.Fprintf(os.Stderr, "解析配置文件失败: %v\n", err)
+			os.Exit(1)
 		}
 	})
 

@@ -13,6 +13,7 @@ import (
 	"contract_review/app/internal/gateway"
 	"contract_review/app/internal/global"
 	"contract_review/app/internal/knowledge"
+	"contract_review/app/internal/middleware"
 	"contract_review/app/internal/middleware/jwt_auth"
 	"contract_review/app/internal/middleware/redis"
 	"contract_review/app/internal/modelconfig"
@@ -160,6 +161,9 @@ func main() {
 
 	// 8. 创建 repos
 	userRepo := user.NewUserRepo(db)
+	if err := userRepo.EnsureSystemOwner(ctx); err != nil {
+		global.Log.Fatal("初始化系统管理员失败", zap.Error(err))
+	}
 	sessionRepo := session.NewSessionRepo(db)
 	contractRepo := contract.NewContractRepo(db)
 	reviewRepo := review.NewReviewRepo(db)
@@ -189,15 +193,37 @@ func main() {
 	gatewayHandler := gateway.NewHandler(global.Gateway)
 	qaHandler := qa.NewQAHandler(qaService)
 
+	// 后台预热审阅编排器：提前加载知识库、构建向量索引，避免首次审阅请求等待 2-5 秒。
+	go func() {
+		warmCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if _, err := reviewService.InitOrchestrator(warmCtx); err != nil {
+			global.Log.Warn("审阅编排器预热失败（首次审阅时将自动初始化）", zap.Error(err))
+		} else {
+			global.Log.Info("审阅编排器预热完成")
+		}
+	}()
+
 	// 9. 创建 Hertz 服务器并注册路由
 	addr := fmt.Sprintf("%s:%d", global.Config.Server.Host, global.Config.Server.Port)
 	h := server.Default(server.WithHostPorts(addr))
 
-	// 静态文件
-	h.Static("/api/static", contract.UploadDir())
-
 	api := h.Group("/api")
 	authMW := jwt_auth.AccessJWTAuth()
+	adminMW := middleware.RequireSystemRole(middleware.SystemRoleAdmin, middleware.SystemRoleOwner)
+	// scopeMW 解析当前账号为统一的 ResourceScope（含数字 UserID、SystemRole 与预留
+	// OrganizationID），一次请求解析一次并缓存，供 handler/service 复用，取代各模块
+	// 重复的 ResolveUserID。
+	scopeMW := middleware.ResolveScope(middleware.NewDBIdentityResolver(
+		func(ctx context.Context, account string) (uint64, string, error) {
+			u, err := userRepo.GetUserByAccount(ctx, account)
+			if err != nil {
+				return 0, "", err
+			}
+			return uint64(u.ID), u.SystemRole, nil
+		},
+		global.Redis,
+	))
 
 	// ============ User 路由（无鉴权） ============
 	api.POST("/user/create", userHandler.Register)
@@ -205,25 +231,25 @@ func main() {
 	api.POST("/user/refresh_token", userHandler.RefreshToken)
 
 	// ============ User 路由（需鉴权） ============
-	api.POST("/user/logout", authMW, userHandler.Logout)
-	api.GET("/user/me", authMW, userHandler.GetUserInfo)
+	api.POST("/user/logout", authMW, scopeMW, userHandler.Logout)
+	api.GET("/user/me", authMW, scopeMW, userHandler.GetUserInfo)
 
 	// ============ Session 路由 ============
-	api.POST("/session/create_session", authMW, sessionHandler.CreateSession)
-	api.POST("/session/list_sessions", authMW, sessionHandler.ListSessions)
-	api.PUT("/session/title", authMW, sessionHandler.UpdateSessionTitle)
-	api.POST("/session/delete_session", authMW, sessionHandler.DeleteSession)
-	api.POST("/session/session_history_detail", authMW, sessionHandler.GetSessionHistoryDetail)
-	api.GET("/session/:id", authMW, sessionHandler.GetSessionByID)
+	api.POST("/session/create_session", authMW, scopeMW, sessionHandler.CreateSession)
+	api.POST("/session/list_sessions", authMW, scopeMW, sessionHandler.ListSessions)
+	api.PUT("/session/title", authMW, scopeMW, sessionHandler.UpdateSessionTitle)
+	api.POST("/session/delete_session", authMW, scopeMW, sessionHandler.DeleteSession)
+	api.POST("/session/session_history_detail", authMW, scopeMW, sessionHandler.GetSessionHistoryDetail)
+	api.GET("/session/:id", authMW, scopeMW, sessionHandler.GetSessionByID)
 
 	// ============ Contract 路由 ============
-	api.POST("/contract/upload", authMW, contractHandler.UploadContractFile)
-	api.GET("/contract/list", authMW, contractHandler.ListContracts)
-	api.PUT("/contract/:id/type", authMW, contractHandler.UpdateContractType)
-	api.DELETE("/contract/:id", authMW, contractHandler.DeleteContract)
-	api.GET("/contract/download/:id", authMW, contractHandler.DownloadContract)
-	api.POST("/contract/save_file", authMW, contractHandler.UploadContractFile)
-	api.GET("/contract/check_file", authMW, func(ctx context.Context, c *app.RequestContext) {
+	api.POST("/contract/upload", authMW, scopeMW, contractHandler.UploadContractFile)
+	api.GET("/contract/list", authMW, scopeMW, contractHandler.ListContracts)
+	api.PUT("/contract/:id/type", authMW, scopeMW, contractHandler.UpdateContractType)
+	api.DELETE("/contract/:id", authMW, scopeMW, contractHandler.DeleteContract)
+	api.GET("/contract/download/:id", authMW, scopeMW, contractHandler.DownloadContract)
+	api.POST("/contract/save_file", authMW, scopeMW, contractHandler.UploadContractFile)
+	api.GET("/contract/check_file", authMW, scopeMW, func(ctx context.Context, c *app.RequestContext) {
 		c.JSON(http.StatusOK, map[string]interface{}{
 			"code": 200,
 			"msg":  "Success",
@@ -232,43 +258,43 @@ func main() {
 	})
 
 	// ============ Contract Type 路由 ============
-	api.POST("/contract_type/create", authMW, contractHandler.CreateContractType)
-	api.GET("/contract_type/detail/:id", authMW, contractHandler.GetContractType)
-	api.GET("/contract_type/list", authMW, contractHandler.ListContractTypes)
-	api.GET("/contract_type/page", authMW, contractHandler.ListContractTypes)
-	api.GET("/contract_type/creators", authMW, contractHandler.ListContractTypeCreators)
-	api.PUT("/contract_type/update/:id", authMW, contractHandler.UpdateContractTypeName)
-	api.DELETE("/contract_type/delete/:id", authMW, contractHandler.DeleteContractType)
-	api.DELETE("/contract_type/batchdelete", authMW, contractHandler.BatchDeleteContractType)
+	api.POST("/contract_type/create", authMW, scopeMW, adminMW, contractHandler.CreateContractType)
+	api.GET("/contract_type/detail/:id", authMW, scopeMW, contractHandler.GetContractType)
+	api.GET("/contract_type/list", authMW, scopeMW, contractHandler.ListContractTypes)
+	api.GET("/contract_type/page", authMW, scopeMW, contractHandler.ListContractTypes)
+	api.GET("/contract_type/creators", authMW, scopeMW, contractHandler.ListContractTypeCreators)
+	api.PUT("/contract_type/update/:id", authMW, scopeMW, adminMW, contractHandler.UpdateContractTypeName)
+	api.DELETE("/contract_type/delete/:id", authMW, scopeMW, adminMW, contractHandler.DeleteContractType)
+	api.DELETE("/contract_type/batchdelete", authMW, scopeMW, adminMW, contractHandler.BatchDeleteContractType)
 
 	// ============ Risk Point 路由 ============
-	api.POST("/risk_point/create", authMW, riskPointHandler.Create)
-	api.GET("/risk_point/detail/:id", authMW, riskPointHandler.Detail)
-	api.GET("/risk_point/list", authMW, riskPointHandler.List)
-	api.GET("/risk_point/page", authMW, riskPointHandler.List)
-	api.GET("/risk_point/stats", authMW, riskPointHandler.Stats)
-	api.PUT("/risk_point/update/:id", authMW, riskPointHandler.Update)
-	api.DELETE("/risk_point/delete/:id", authMW, riskPointHandler.Delete)
-	api.DELETE("/risk_point/batchdelete", authMW, riskPointHandler.BatchDelete)
+	api.POST("/risk_point/create", authMW, scopeMW, adminMW, riskPointHandler.Create)
+	api.GET("/risk_point/detail/:id", authMW, scopeMW, riskPointHandler.Detail)
+	api.GET("/risk_point/list", authMW, scopeMW, riskPointHandler.List)
+	api.GET("/risk_point/page", authMW, scopeMW, riskPointHandler.List)
+	api.GET("/risk_point/stats", authMW, scopeMW, riskPointHandler.Stats)
+	api.PUT("/risk_point/update/:id", authMW, scopeMW, adminMW, riskPointHandler.Update)
+	api.DELETE("/risk_point/delete/:id", authMW, scopeMW, adminMW, riskPointHandler.Delete)
+	api.DELETE("/risk_point/batchdelete", authMW, scopeMW, adminMW, riskPointHandler.BatchDelete)
 
 	// ============ Review 路由 ============
-	api.POST("/review_task/start_task", authMW, reviewHandler.StartReviewTask)
-	api.POST("/review_task/accept_contract_file", authMW, func(ctx context.Context, c *app.RequestContext) {
+	api.POST("/review_task/start_task", authMW, scopeMW, reviewHandler.StartReviewTask)
+	api.POST("/review_task/accept_contract_file", authMW, scopeMW, func(ctx context.Context, c *app.RequestContext) {
 		c.JSON(http.StatusOK, map[string]interface{}{"code": 200, "msg": "Success"})
 	})
-	api.GET("/review/task", authMW, reviewHandler.GetReviewTask)
-	api.GET("/review/task/:id", authMW, reviewHandler.GetReviewTaskByID)
-	api.GET("/review/tasks", authMW, reviewHandler.ListReviewTasks)
-	api.GET("/review/results", authMW, reviewHandler.GetReviewResults)
-	api.GET("/review/results/session", authMW, reviewHandler.GetReviewResultsBySessionID)
-	api.DELETE("/review/task/:id", authMW, reviewHandler.DeleteReviewTask)
+	api.GET("/review/task", authMW, scopeMW, reviewHandler.GetReviewTask)
+	api.GET("/review/task/:id", authMW, scopeMW, reviewHandler.GetReviewTaskByID)
+	api.GET("/review/tasks", authMW, scopeMW, reviewHandler.ListReviewTasks)
+	api.GET("/review/results", authMW, scopeMW, reviewHandler.GetReviewResults)
+	api.GET("/review/results/session", authMW, scopeMW, reviewHandler.GetReviewResultsBySessionID)
+	api.DELETE("/review/task/:id", authMW, scopeMW, reviewHandler.DeleteReviewTask)
 
 	// ============ Comparison 路由 ============
-	api.POST("/comparison_task/start", authMW, comparisonHandler.StartComparison)
-	api.GET("/comparison/task/:id", authMW, comparisonHandler.GetComparisonTask)
-	api.GET("/comparison/task/session", authMW, comparisonHandler.GetComparisonTaskBySession)
-	api.GET("/comparison/tasks", authMW, comparisonHandler.ListComparisonTasks)
-	api.DELETE("/comparison/task/:id", authMW, comparisonHandler.DeleteComparisonTask)
+	api.POST("/comparison_task/start", authMW, scopeMW, comparisonHandler.StartComparison)
+	api.GET("/comparison/task/:id", authMW, scopeMW, comparisonHandler.GetComparisonTask)
+	api.GET("/comparison/task/session", authMW, scopeMW, comparisonHandler.GetComparisonTaskBySession)
+	api.GET("/comparison/tasks", authMW, scopeMW, comparisonHandler.ListComparisonTasks)
+	api.DELETE("/comparison/task/:id", authMW, scopeMW, comparisonHandler.DeleteComparisonTask)
 
 	// ============ Stub 路由（前端需要但后端未实现） ============
 	stubJSON := func(data interface{}) app.HandlerFunc {
@@ -284,28 +310,33 @@ func main() {
 	api.GET("/signboard/departments_usage", stubJSON([]interface{}{}))
 	api.GET("/signboard/trends_contracts", stubJSON([]interface{}{}))
 
-	api.GET("/model_configs/get_all_models/", authMW, modelConfigHandler.List)
-	api.GET("/model_configs/get_default_model", authMW, modelConfigHandler.GetDefault)
-	api.GET("/model_configs/provider_options", authMW, modelConfigHandler.ProviderOptions)
-	api.POST("/model_configs/create_model", authMW, modelConfigHandler.Create)
-	api.PUT("/model_configs/update_model/:id", authMW, modelConfigHandler.Update)
+	// 模型配置查询——所有用户可查看（用于选择模型）
+	api.GET("/model_configs/get_all_models/", authMW, scopeMW, modelConfigHandler.List)
+	api.GET("/model_configs/get_default_model", authMW, scopeMW, modelConfigHandler.GetDefault)
+	api.GET("/model_configs/provider_options", authMW, scopeMW, modelConfigHandler.ProviderOptions)
+	// 模型配置管理——仅管理员可创建/修改
+	api.POST("/model_configs/create_model", authMW, scopeMW, adminMW, modelConfigHandler.Create)
+	api.PUT("/model_configs/update_model/:id", authMW, scopeMW, adminMW, modelConfigHandler.Update)
 
 	// ============ Gateway 路由（成本看板 / 路由配置 / 配额） ============
-	api.GET("/gateway/usage_stats", authMW, gatewayHandler.UsageStats)
-	api.GET("/gateway/usage_trend", authMW, gatewayHandler.UsageTrend)
-	api.GET("/gateway/routes", authMW, gatewayHandler.ListRoutes)
-	api.PUT("/gateway/route", authMW, gatewayHandler.UpdateRoute)
-	api.GET("/gateway/quotas", authMW, gatewayHandler.ListQuotas)
-	api.PUT("/gateway/quota", authMW, gatewayHandler.SetQuota)
+	// 个人用量统计——所有用户可查看自己的 token 消耗
+	api.GET("/gateway/usage_stats", authMW, scopeMW, gatewayHandler.UsageStats)
+	api.GET("/gateway/usage_trend", authMW, scopeMW, gatewayHandler.UsageTrend)
+	// 个人配额——所有用户可查看自己的配额
+	api.GET("/gateway/quotas", authMW, scopeMW, gatewayHandler.ListQuotas)
+	// 管理员路由——路由配置与配额设置
+	api.GET("/gateway/routes", authMW, scopeMW, adminMW, gatewayHandler.ListRoutes)
+	api.PUT("/gateway/route", authMW, scopeMW, adminMW, gatewayHandler.UpdateRoute)
+	api.PUT("/gateway/quota", authMW, scopeMW, adminMW, gatewayHandler.SetQuota)
 
-	api.GET("/prompt_manage/org/", stubJSON(map[string]interface{}{
+	api.GET("/prompt_manage/org/", authMW, scopeMW, adminMW, stubJSON(map[string]interface{}{
 		"prompt_text": "",
 	}))
 
 	// ============ 合同问答 路由（SSE 流式 + 多轮 + 绑定合同） ============
-	api.POST("/qa/ask", authMW, qaHandler.Ask)
-	api.GET("/qa/messages", authMW, qaHandler.GetMessages)
-	api.POST("/qa/clear", authMW, qaHandler.ClearMessages)
+	api.POST("/qa/ask", authMW, scopeMW, qaHandler.Ask)
+	api.GET("/qa/messages", authMW, scopeMW, qaHandler.GetMessages)
+	api.POST("/qa/clear", authMW, scopeMW, qaHandler.ClearMessages)
 
 	// 10. 启动服务
 	global.Log.Info("服务启动", zap.String("addr", addr))

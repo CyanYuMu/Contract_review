@@ -40,6 +40,10 @@ func (us *UserService) CreateUser(ctx context.Context, user *User) error {
 	if err := us.userrepo.CreateUser(ctx, user); err != nil {
 		return err
 	}
+	if err := us.userrepo.EnsureSystemOwner(ctx); err != nil {
+		global.Log.Error("EnsureSystemOwner error", zap.Error(err))
+		return err
+	}
 	return nil
 }
 
@@ -58,7 +62,7 @@ func (us *UserService) Login(ctx context.Context, account string, password strin
 		return "", "", err
 	}
 	//generate Token
-	accessToken, err = auth.GenerateAccessToken(dbuser.Account, dbuser.Username)
+	accessToken, err = auth.GenerateAccessToken(dbuser.Account, dbuser.Username, dbuser.SystemRole)
 	if err != nil {
 		global.Log.Error("GenerateAccessToken error")
 		return "", "", err
@@ -115,7 +119,7 @@ func (us *UserService) RefreshAccessToken(ctx context.Context, refreshToken stri
 	}
 
 	// 生成新的 access token
-	newAccessToken, err = auth.GenerateAccessToken(user.Account, user.Username)
+	newAccessToken, err = auth.GenerateAccessToken(user.Account, user.Username, user.SystemRole)
 	if err != nil {
 		global.Log.Error("GenerateAccessToken error", zap.Error(err))
 		return "", err

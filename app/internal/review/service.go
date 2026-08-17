@@ -33,22 +33,22 @@ type SessionQuerier interface {
 
 // ReviewService 审阅服务
 type ReviewService struct {
-	reviewRepo        *ReviewRepo
-	reviewResultRepo  *ReviewResultRepo
-	db                *gorm.DB
-	cache             *redis.RedisClient
-	llm               fmodel.BaseChatModel
-	orchestrator      *agent.ReviewOrchestrator
-	basePrompt        string
-	contractPrompts   map[string]string
-	vectorComponentMu sync.Mutex
-	vectorStore       rag.VectorStore
-	vectorEmbedder    rag.EmbeddingModel
-	vectorConfigKey   string
-	vectorIndexMu     sync.Mutex
-	vectorIndexHashes map[string]string
-	orchMu              sync.Mutex
-	knowledgeSignature  string
+	reviewRepo         *ReviewRepo
+	reviewResultRepo   *ReviewResultRepo
+	db                 *gorm.DB
+	cache              *redis.RedisClient
+	llm                fmodel.BaseChatModel
+	orchestrator       *agent.ReviewOrchestrator
+	basePrompt         string
+	contractPrompts    map[string]string
+	vectorComponentMu  sync.Mutex
+	vectorStore        rag.VectorStore
+	vectorEmbedder     rag.EmbeddingModel
+	vectorConfigKey    string
+	vectorIndexMu      sync.Mutex
+	vectorIndexHashes  map[string]string
+	orchMu             sync.Mutex
+	knowledgeSignature string
 }
 
 // NewReviewService 创建审阅服务
@@ -101,14 +101,14 @@ func (s *ReviewService) loadPromptTemplates() error {
 
 	// 加载不同合同类型的提示词（七大类标准分类 + 通用兜底）
 	contractTypePrompts := map[string]string{
-		"买卖合同":     "contract_reviewer_prompt_sale.txt",
-		"服务合同":     "contract_reviewer_prompt_service.txt",
-		"劳动合同":     "contract_reviewer_prompt_labor.txt",
-		"租赁合同":     "contract_reviewer_prompt_lease.txt",
-		"借款合同":     "contract_reviewer_prompt_loan.txt",
-		"合作合同":     "contract_reviewer_prompt_coop.txt",
+		"买卖合同":   "contract_reviewer_prompt_sale.txt",
+		"服务合同":   "contract_reviewer_prompt_service.txt",
+		"劳动合同":   "contract_reviewer_prompt_labor.txt",
+		"租赁合同":   "contract_reviewer_prompt_lease.txt",
+		"借款合同":   "contract_reviewer_prompt_loan.txt",
+		"合作合同":   "contract_reviewer_prompt_coop.txt",
 		"知识产权合同": "contract_reviewer_prompt_ip.txt",
-		"通用":        "contract_reviewer_prompt_base.txt",
+		"通用":     "contract_reviewer_prompt_base.txt",
 	}
 
 	for contractType, filename := range contractTypePrompts {
@@ -124,7 +124,7 @@ func (s *ReviewService) loadPromptTemplates() error {
 // ============ Task CRUD Operations ============
 
 // CreateReviewTask 创建审阅任务
-func (s *ReviewService) CreateReviewTask(ctx context.Context, account string, req *CreateReviewTaskRequest) (*ReviewTask, error) {
+func (s *ReviewService) CreateReviewTask(ctx context.Context, account string, userID uint64, req *CreateReviewTaskRequest) (*ReviewTask, error) {
 	// 验证会话存在并获取 FileID
 	var sessRecord struct {
 		ID     uint64 `gorm:"column:id"`
@@ -135,18 +135,21 @@ func (s *ReviewService) CreateReviewTask(ctx context.Context, account string, re
 		Where("id = ?", req.SessionID).First(&sessRecord).Error; err != nil {
 		return nil, fmt.Errorf("获取会话信息失败: %w", err)
 	}
-	var userRecord struct {
+	if sessRecord.UserID != userID {
+		return nil, fmt.Errorf("无权访问该会话")
+	}
+	var ownedContract struct {
 		ID uint64 `gorm:"column:id"`
 	}
-	if err := s.db.WithContext(ctx).Table("users").Select("id").Where("account = ?", account).First(&userRecord).Error; err != nil {
-		return nil, fmt.Errorf("获取用户信息失败: %w", err)
-	}
-	if sessRecord.UserID != userRecord.ID {
-		return nil, fmt.Errorf("无权访问该会话")
+	if err := s.db.WithContext(ctx).Table("contracts").
+		Select("id").
+		Where("id = ? AND account = ?", sessRecord.FileID, account).
+		First(&ownedContract).Error; err != nil {
+		return nil, fmt.Errorf("无权访问该合同")
 	}
 
 	// 检查是否已存在任务，存在则删除旧任务
-	existingTask, err := s.reviewRepo.GetBySessionID(ctx, req.SessionID)
+	existingTask, err := s.reviewRepo.GetBySessionIDAndUserID(ctx, req.SessionID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("检查现有任务失败: %w", err)
 	}
@@ -164,7 +167,7 @@ func (s *ReviewService) CreateReviewTask(ctx context.Context, account string, re
 	task := &ReviewTask{
 		SessionID:    req.SessionID,
 		FileID:       sessRecord.FileID,
-		UserID:       userRecord.ID,
+		UserID:       userID,
 		Stance:       req.Stance,
 		Intensity:    req.Intensity,
 		ContractType: req.ContractType,
@@ -180,13 +183,13 @@ func (s *ReviewService) CreateReviewTask(ctx context.Context, account string, re
 }
 
 // GetReviewTask 获取审阅任务
-func (s *ReviewService) GetReviewTask(ctx context.Context, sessionID uint64) (*ReviewTask, error) {
-	return s.reviewRepo.GetBySessionID(ctx, sessionID)
+func (s *ReviewService) GetReviewTask(ctx context.Context, userID, sessionID uint64) (*ReviewTask, error) {
+	return s.reviewRepo.GetBySessionIDAndUserID(ctx, sessionID, userID)
 }
 
 // GetReviewTaskByID 根据ID获取审阅任务
-func (s *ReviewService) GetReviewTaskByID(ctx context.Context, id uint64) (*ReviewTask, error) {
-	return s.reviewRepo.GetByID(ctx, id)
+func (s *ReviewService) GetReviewTaskByID(ctx context.Context, userID, id uint64) (*ReviewTask, error) {
+	return s.reviewRepo.GetByIDAndUserID(ctx, id, userID)
 }
 
 // ListUserReviewTasks 获取用户的审阅任务列表
@@ -201,7 +204,14 @@ func (s *ReviewService) UpdateTaskStatus(ctx context.Context, taskID uint64, sta
 }
 
 // DeleteReviewTask 删除审阅任务
-func (s *ReviewService) DeleteReviewTask(ctx context.Context, taskID uint64) error {
+func (s *ReviewService) DeleteReviewTask(ctx context.Context, userID, taskID uint64) error {
+	task, err := s.reviewRepo.GetByIDAndUserID(ctx, taskID, userID)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return gorm.ErrRecordNotFound
+	}
 	// 先删除关联的审阅结果
 	if err := s.reviewResultRepo.DeleteByTaskID(ctx, taskID); err != nil {
 		global.Log.Warn("删除审阅结果失败", zap.Error(err))
@@ -222,12 +232,26 @@ func (s *ReviewService) UpdateReviewResult(ctx context.Context, result *ReviewRe
 }
 
 // GetReviewResults 获取审阅结果列表
-func (s *ReviewService) GetReviewResults(ctx context.Context, taskID uint64) ([]ReviewResult, error) {
+func (s *ReviewService) GetReviewResults(ctx context.Context, userID, taskID uint64) ([]ReviewResult, error) {
+	task, err := s.reviewRepo.GetByIDAndUserID(ctx, taskID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, gorm.ErrRecordNotFound
+	}
 	return s.reviewResultRepo.GetByTaskID(ctx, taskID)
 }
 
 // GetReviewResultsBySessionID 根据会话ID获取审阅结果
-func (s *ReviewService) GetReviewResultsBySessionID(ctx context.Context, sessionID uint64) ([]ReviewResult, error) {
+func (s *ReviewService) GetReviewResultsBySessionID(ctx context.Context, userID, sessionID uint64) ([]ReviewResult, error) {
+	task, err := s.reviewRepo.GetBySessionIDAndUserID(ctx, sessionID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, gorm.ErrRecordNotFound
+	}
 	return s.reviewResultRepo.GetBySessionID(ctx, sessionID)
 }
 
@@ -251,10 +275,16 @@ func (s *ReviewService) CalculateOverallRisk(totalIssues int) string {
 // ============ Agent 模式审阅 (新架构) ============
 
 // InitOrchestrator 初始化 Agent 编排器
-func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
+func (s *ReviewService) InitOrchestrator(ctx context.Context) (*agent.ReviewOrchestrator, error) {
+	// Serialize cache refresh and return the exact immutable orchestrator
+	// snapshot selected for this run. A later knowledge refresh may replace the
+	// service pointer, but cannot mutate the snapshot already in use.
+	s.orchMu.Lock()
+	defer s.orchMu.Unlock()
+
 	if s.llm == nil {
 		if err := s.InitLLM(ctx); err != nil {
-			return fmt.Errorf("初始化 LLM 失败: %w", err)
+			return nil, fmt.Errorf("初始化 LLM 失败: %w", err)
 		}
 	}
 
@@ -263,18 +293,23 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 	var pendingSig string
 	if sig, err := knowledge.NewRepo(global.DB).KnowledgeSignature(ctx); err == nil {
 		pendingSig = sig
-		s.orchMu.Lock()
 		reuse := s.orchestrator != nil && s.knowledgeSignature == sig
-		s.orchMu.Unlock()
 		if reuse {
 			global.Log.Debug("知识库签名未变化，复用已构建的 Agent 编排器", zap.String("signature", sig))
-			return nil
+			return s.orchestrator, nil
 		}
 	} else {
 		global.Log.Warn("知识库签名查询失败，执行全量加载", zap.Error(err))
 	}
 
 	llmGenerate := func(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
+		// DevMode：跳过真实 LLM 调用，返回 mock 响应用于前端开发迭代
+		if os.Getenv("REVIEW_MOCK_LLM") == "true" {
+			return &schema.Message{
+				Role:    schema.Assistant,
+				Content: `{"status":"ok","message":"DevMode mock response"}`,
+			}, nil
+		}
 		// 优先走大模型网关（统一入口 + 限流/配额/成本/语义缓存）；网关不可用时回退原 LLM
 		if global.Gateway != nil {
 			return global.Gateway.Generate(ctx, messages)
@@ -366,9 +401,7 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 
 	// 编排器构建成功后，记录知识库签名，供后续审阅复用判断。
 	if pendingSig != "" {
-		s.orchMu.Lock()
 		s.knowledgeSignature = pendingSig
-		s.orchMu.Unlock()
 	}
 
 	global.Log.Info("Agent 编排器初始化完成",
@@ -376,7 +409,7 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) error {
 		zap.Bool("bm25_enabled", retrieverConfig.EnableBM25),
 		zap.Bool("rerank_enabled", retrieverConfig.EnableRerank),
 		zap.Int("keyword_chunks", len(keywordIndex.SearchableChunks())))
-	return nil
+	return s.orchestrator, nil
 }
 
 // buildRerankerConfig 从全局配置构建 RerankerConfig
@@ -608,7 +641,8 @@ func (s *ReviewService) AgentReviewContract(
 	resultChan chan<- ChunkResult,
 ) error {
 	// 每次审阅前重新加载知识库，确保刚在 setting/risk 配置的风险点能立即进入 RAG。
-	if err := s.InitOrchestrator(ctx); err != nil {
+	orchestrator, err := s.InitOrchestrator(ctx)
+	if err != nil {
 		return fmt.Errorf("初始化 Agent 编排器失败: %w", err)
 	}
 
@@ -635,43 +669,45 @@ func (s *ReviewService) AgentReviewContract(
 		return err
 	}
 
-	s.orchestrator.SetProgressCallback(func(event agent.ProgressEvent) {
-		global.Log.Info("Agent 进度",
-			zap.String("phase", event.Phase),
-			zap.String("agent", event.Agent),
-			zap.String("status", event.Status),
-			zap.String("message", event.Message),
-			zap.Float64("progress", event.Progress))
+	callbacks := agent.ReviewCallbacks{
+		OnProgress: func(event agent.ProgressEvent) {
+			global.Log.Info("Agent 进度",
+				zap.String("phase", event.Phase),
+				zap.String("agent", event.Agent),
+				zap.String("status", event.Status),
+				zap.String("message", event.Message),
+				zap.Float64("progress", event.Progress))
 
-		resultChan <- ChunkResult{
-			Progress: &ReviewSSEProgressData{
-				Phase:     event.Phase,
-				Agent:     event.Agent,
-				Status:    event.Status,
-				Message:   event.Message,
-				Progress:  event.Progress,
-				Timestamp: event.Timestamp.Format("2006-01-02 15:04:05"),
-				Data:      sanitizeProgressData(event.Data),
-			},
-		}
-	})
-	s.orchestrator.SetFindingCallback(func(finding agent.RiskFinding) {
-		suggestedContent := finding.SuggestedText
-		reason := finding.SuggestionReason
-		if suggestedContent == "" {
-			suggestedContent = "修改建议生成中..."
-		}
-		if reason == "" {
-			reason = "AI 已识别风险，正在生成可执行修改建议。"
-		}
-		resultChan <- ChunkResult{
-			Modifications: []ModificationItem{
-				modificationFromFinding(finding, suggestedContent, reason),
-			},
-		}
-	})
+			resultChan <- ChunkResult{
+				Progress: &ReviewSSEProgressData{
+					Phase:     event.Phase,
+					Agent:     event.Agent,
+					Status:    event.Status,
+					Message:   event.Message,
+					Progress:  event.Progress,
+					Timestamp: event.Timestamp.Format("2006-01-02 15:04:05"),
+					Data:      sanitizeProgressData(event.Data),
+				},
+			}
+		},
+		OnFinding: func(finding agent.RiskFinding) {
+			suggestedContent := finding.SuggestedText
+			reason := finding.SuggestionReason
+			if suggestedContent == "" {
+				suggestedContent = "修改建议生成中..."
+			}
+			if reason == "" {
+				reason = "AI 已识别风险，正在生成可执行修改建议。"
+			}
+			resultChan <- ChunkResult{
+				Modifications: []ModificationItem{
+					modificationFromFinding(finding, suggestedContent, reason),
+				},
+			}
+		},
+	}
 
-	report, err := s.orchestrator.ReviewContract(ctx, contractContent, meta)
+	report, err := orchestrator.ReviewContract(ctx, contractContent, meta, callbacks)
 	if err != nil {
 		global.Log.Error("Agent 审阅失败", zap.Error(err))
 		return fmt.Errorf("Agent 审阅失败: %w", err)

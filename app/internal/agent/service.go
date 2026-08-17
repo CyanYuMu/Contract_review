@@ -122,6 +122,11 @@ func GetContractAgent() *ContractAgent {
 // 优先复用启动时初始化的全局 ContractAgent（main.go 中 InitContractAgent 已调用），
 // 避免每次上传都重建 LLM client 与重读 prompt 文件；全局未就绪时兜底新建。
 func LLMContractParse(ctx context.Context, content string) (string, error) {
+	if os.Getenv("REVIEW_MOCK_LLM") == "true" {
+		global.Log.Debug("DevMode: 跳过合同元数据LLM提取，返回mock数据")
+		return mockContractParseResult(), nil
+	}
+
 	ca := GetContractAgent()
 	if ca == nil {
 		agent, err := NewContractAgent(ctx)
@@ -131,6 +136,12 @@ func LLMContractParse(ctx context.Context, content string) (string, error) {
 		return agent.ParseContract(ctx, content)
 	}
 	return ca.ParseContract(ctx, content)
+}
+
+// mockContractParseResult returns a deterministic contract metadata JSON
+// so frontend developers can iterate without consuming real LLM tokens.
+func mockContractParseResult() string {
+	return `{"party_a":"甲方测试公司","party_b":"乙方测试公司","amount":"1000000元","type":"买卖合同"}`
 }
 
 // ExtractJSONFromResponse 从LLM响应中提取JSON

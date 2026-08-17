@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"os"
 	"time"
 
 	"contract_review/app/internal/middleware/redis"
@@ -15,29 +16,29 @@ import (
 
 // Config 网关运行配置
 type Config struct {
-	EnableRateLimit  bool          `mapstructure:"enable_rate_limit"`
-	RateLimitPerMin  int           `mapstructure:"rate_limit_per_min"` // 每用户+功能 每分钟请求上限
-	EnableQuota      bool          `mapstructure:"enable_quota"`
-	EnableCostLog    bool          `mapstructure:"enable_cost_log"`
-	EnableCache      bool          `mapstructure:"enable_cache"`
-	CacheThreshold   float64       `mapstructure:"cache_threshold"`   // 余弦相似度阈值
-	CacheTTL         time.Duration `mapstructure:"cache_ttl"`         // 缓存存活时长
-	CacheMaxEntries  int           `mapstructure:"cache_max_entries"`  // 每功能最大缓存条数
+	EnableRateLimit bool          `mapstructure:"enable_rate_limit"`
+	RateLimitPerMin int           `mapstructure:"rate_limit_per_min"` // 每用户+功能 每分钟请求上限
+	EnableQuota     bool          `mapstructure:"enable_quota"`
+	EnableCostLog   bool          `mapstructure:"enable_cost_log"`
+	EnableCache     bool          `mapstructure:"enable_cache"`
+	CacheThreshold  float64       `mapstructure:"cache_threshold"`   // 余弦相似度阈值
+	CacheTTL        time.Duration `mapstructure:"cache_ttl"`         // 缓存存活时长
+	CacheMaxEntries int           `mapstructure:"cache_max_entries"` // 每功能最大缓存条数
 	RequestTimeoutS int           `mapstructure:"request_timeout_s"` // 单次模型请求超时（秒）
 }
 
 // DefaultConfig 默认配置（未配置 yaml 时使用）
 func DefaultConfig() Config {
 	return Config{
-		EnableRateLimit:  true,
-		RateLimitPerMin:  30,
-		EnableQuota:      true,
-		EnableCostLog:    true,
-		EnableCache:      false, // 默认关闭，需 embedding 配置就绪后开启
-		CacheThreshold:   0.92,
-		CacheTTL:         24 * time.Hour,
-		CacheMaxEntries:  200,
-		RequestTimeoutS:  300,
+		EnableRateLimit: true,
+		RateLimitPerMin: 30,
+		EnableQuota:     true,
+		EnableCostLog:   true,
+		EnableCache:     false, // 默认关闭，需 embedding 配置就绪后开启
+		CacheThreshold:  0.92,
+		CacheTTL:        24 * time.Hour,
+		CacheMaxEntries: 200,
+		RequestTimeoutS: 300,
 	}
 }
 
@@ -107,6 +108,16 @@ func (g *Gateway) Chat(ctx context.Context, req GatewayRequest) (*GatewayRespons
 	if req.Feature == "" {
 		req.Feature = FeatureDefault
 	}
+
+	// Dev mode: skip real LLM call, return mock response for fast iteration without token cost
+	if os.Getenv("REVIEW_MOCK_LLM") == "true" {
+		return &GatewayResponse{
+			Message:   &schema.Message{Role: schema.Assistant, Content: "DevMode mock response"},
+			ModelName: "mock-dev",
+			Provider:  "mock",
+		}, nil
+	}
+
 	resp := &GatewayResponse{}
 
 	cfg, err := g.resolveModel(ctx, req.Feature)
@@ -121,7 +132,7 @@ func (g *Gateway) Chat(ctx context.Context, req GatewayRequest) (*GatewayRespons
 	// 1. 语义缓存命中检查
 	// 审阅场景每条款 prompt 含不同条款内容，相似度几乎不可能命中，反而每次算 embedding；
 	// 直接跳过缓存，避免无谓的 embedding 计算开销。
-	if g.cache != nil && query != "" && req.Feature != FeatureReview {
+	if g.cache != nil && query != "" && semanticAnswerCacheAllowed(req.Feature) {
 		if cached, ok := g.cache.lookup(ctx, req.Feature, query); ok {
 			resp.Message = &schema.Message{Role: schema.Assistant, Content: cached}
 			resp.CacheHit = true
@@ -163,7 +174,7 @@ func (g *Gateway) Chat(ctx context.Context, req GatewayRequest) (*GatewayRespons
 	}
 
 	// 6. 写语义缓存
-	if g.cache != nil && query != "" && req.Feature != FeatureReview {
+	if g.cache != nil && query != "" && semanticAnswerCacheAllowed(req.Feature) {
 		g.cache.store(ctx, req.Feature, query, content)
 	}
 
@@ -176,6 +187,20 @@ func (g *Gateway) StreamChat(ctx context.Context, req GatewayRequest, onDelta fu
 	if req.Feature == "" {
 		req.Feature = FeatureDefault
 	}
+
+	// Dev mode: skip real LLM call, return mock response for fast iteration without token cost
+	if os.Getenv("REVIEW_MOCK_LLM") == "true" {
+		mockContent := "DevMode mock stream response"
+		if onDelta != nil {
+			onDelta(mockContent)
+		}
+		return &GatewayResponse{
+			Message:   &schema.Message{Role: schema.Assistant, Content: mockContent},
+			ModelName: "mock-dev",
+			Provider:  "mock",
+		}, nil
+	}
+
 	resp := &GatewayResponse{}
 
 	cfg, err := g.resolveModel(ctx, req.Feature)
@@ -188,7 +213,7 @@ func (g *Gateway) StreamChat(ctx context.Context, req GatewayRequest, onDelta fu
 	query := lastUserMessage(req.Messages)
 
 	// 缓存命中：一次性回放完整答案（审阅场景跳过，原因同 Chat）
-	if g.cache != nil && query != "" && req.Feature != FeatureReview {
+	if g.cache != nil && query != "" && semanticAnswerCacheAllowed(req.Feature) {
 		if cached, ok := g.cache.lookup(ctx, req.Feature, query); ok {
 			if onDelta != nil {
 				onDelta(cached)
@@ -228,6 +253,15 @@ func (g *Gateway) StreamChat(ctx context.Context, req GatewayRequest, onDelta fu
 		g.cache.store(ctx, req.Feature, query, content)
 	}
 	return resp, nil
+}
+
+// semanticAnswerCacheAllowed intentionally excludes review and QA. Their
+// prompts contain private contract context and conversational history, so a
+// feature+query-only semantic key is not a safe cache boundary. Retrieval and
+// embedding caches can be added separately once their visibility scope is
+// explicit.
+func semanticAnswerCacheAllowed(feature string) bool {
+	return feature != FeatureReview && feature != FeatureQA
 }
 
 func lastUserMessage(messages []*schema.Message) string {

@@ -148,19 +148,24 @@ export default function SettingLayout({
     const [user, setUser] = useState<User | null>(null);
     const [activeKey, setActiveKey] = useState<string>('model');
     const [loading, setLoading] = useState<boolean>(false);
+    const [accessResolved, setAccessResolved] = useState<boolean>(false);
     const [loginVisible, setLoginVisible] = useState(false);
     const [registerVisible, setRegisterVisible] = useState(false);
     const router = useRouter();
     const pathname = usePathname();
+    const isSystemAdmin = user?.system_role === 'admin' || user?.system_role === 'owner';
+    const adminOnlyKeys = new Set(['contractType', 'risk']);
+    const allowedUserPaths = ['/setting/about', '/setting/model', '/setting/cost'];
+    const isAllowedSettingPath = isSystemAdmin || allowedUserPaths.some(p => pathname.includes(p));
 
-    const getSelectedKey = () => {
+    const getSelectedKey = useCallback(() => {
         if (pathname.includes('/setting/model')) return 'model';
         if (pathname.includes('/setting/cost')) return 'cost';
         if (pathname.includes('/setting/contractType')) return 'contractType';
         if (pathname.includes('/setting/risk')) return 'risk';
         if (pathname.includes('/setting/about')) return 'about';
         return 'model';
-    };
+    }, [pathname]);
 
     const handleLoginClick = useCallback(() => {
         setLoginVisible(true);
@@ -179,16 +184,23 @@ export default function SettingLayout({
     useEffect(() => {
         const checkLoginStatus = async () => {
             const token = localStorage.getItem('access_token');
-            if (!token) return;
+            if (!token) {
+                setAccessResolved(true);
+                return;
+            }
 
             try {
-                const userInfo = await getUserInfo();
+                // Force refresh so an old sessionStorage entry created before
+                // system_role existed cannot expose stale privileged UI.
+                const userInfo = await getUserInfo(true);
                 setUser(userInfo);
             } catch {
                 localStorage.removeItem('access_token');
                 localStorage.removeItem('refresh_token');
                 localStorage.removeItem('token_type');
                 setUser(null);
+            } finally {
+                setAccessResolved(true);
             }
         };
 
@@ -197,7 +209,11 @@ export default function SettingLayout({
 
     useEffect(() => {
         setActiveKey(getSelectedKey());
-    }, [pathname]);
+        // Redirect non-admin users away from admin-only pages
+        if (accessResolved && !isSystemAdmin && adminOnlyKeys.has(getSelectedKey())) {
+            router.replace('/setting/about');
+        }
+    }, [accessResolved, getSelectedKey, isSystemAdmin, pathname, router]);
 
     const handleLoginSuccess = async (token: string) => {
         try {
@@ -236,7 +252,7 @@ export default function SettingLayout({
     };
 
     
-const menuItems = [
+const adminMenuItems = [
     {
         key: 'model',
         icon: <ModelIcon active={activeKey === 'model'} />,
@@ -293,6 +309,9 @@ const menuItems = [
         }
     }
 ];
+const menuItems = isSystemAdmin
+    ? adminMenuItems
+    : adminMenuItems.filter((item) => !adminOnlyKeys.has(item.key));
 
     return (
         <div className="flex flex-col h-screen overflow-hidden bg-[#f3f4f6]">
@@ -323,7 +342,7 @@ const menuItems = [
                 {/* 这里渲染子路由内容 */}
                 <div className="flex-1 overflow-auto bg-[#f1f1f1] p-[1.75rem]">
                     <div className="bg-white h-[calc(100vh-64px-3.5rem)] overflow-y-auto !rounded">
-                        {loading ? (
+                        {loading || !accessResolved || !isAllowedSettingPath ? (
                             <div className="flex items-center justify-center h-full">
                                 <Spin size="large" />
                             </div>

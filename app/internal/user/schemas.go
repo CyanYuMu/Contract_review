@@ -1,11 +1,12 @@
 package user
 
 type UserProfile struct {
-	Id        int64  `json:"userId"`   //id为数据库中自增
-	Account   string `json:"account"`  //账号用于登录
-	Username  string `json:"username"` //用户名，即昵称
-	CreatedAt int64  `json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+	Id         int64  `json:"userId"`   //id为数据库中自增
+	Account    string `json:"account"`  //账号用于登录
+	Username   string `json:"username"` //用户名，即昵称
+	SystemRole string `json:"system_role"`
+	CreatedAt  int64  `json:"createdAt"`
+	UpdatedAt  int64  `json:"updatedAt"`
 }
 
 type UserRegisterRequest struct {

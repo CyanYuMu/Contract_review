@@ -9,7 +9,7 @@ import { buildStaticFileUrl, resolveFileUrl } from '@/utils/url';
 import { startComparisonTask } from '@/lib/api/contrastApi';
 import { getHistoryDetail } from '@/lib/api/getHistoryDetail';
 import { getUserInfo } from '@/lib/api/user';
-import { clearTokenInfo } from '@/utils/client';
+import { clearTokenInfo, getAuthToken } from '@/utils/client';
 import { logout } from '@/lib/api/logout';
 import LoginModal from '@/components/auth/LoginModal';
 import RegisterModal from '@/components/auth/RegisterModal';
@@ -1214,7 +1214,10 @@ export default function ContractResult() {
     iframeDoc.head.appendChild(styleContainer);
     
     // 获取文档数据
-    const response = await fetch(resolvedFileUrl);
+    const token = getAuthToken();
+    const response = await fetch(resolvedFileUrl, {
+      headers: token ? { Authorization: 'Bearer ' + token } : undefined,
+    });
     if (!response.ok) {
       throw new Error(`获取文档失败: ${response.status} ${response.statusText}`);
     }

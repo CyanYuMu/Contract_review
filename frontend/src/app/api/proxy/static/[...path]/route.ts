@@ -1,12 +1,10 @@
 import type { NextRequest } from "next/server";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 
 export const dynamic = "force-dynamic";
 
 /**
- * 静态文件代理路由
- * 将 /api/proxy/static/xxx 的请求代理到后端的 /static/xxx
+ * Legacy static-file proxy. It never reads local files directly and requires
+ * the same bearer token as the contract download API.
  */
 export async function GET(
     request: NextRequest,
@@ -20,15 +18,30 @@ export async function GET(
     const upstreamUrl = `${base}/api/static/${staticPath}`;
     
     const auth = request.headers.get("authorization");
+    if (!auth) {
+        return new Response("Unauthorized", {
+            status: 401,
+            headers: {
+                "cache-control": "private, no-store",
+            },
+        });
+    }
 
     try {
         const upstream = await fetch(upstreamUrl, {
             method: "GET",
-            headers: auth ? { Authorization: auth } : undefined,
+            headers: { Authorization: auth },
+            signal: request.signal,
         });
 
         if (!upstream.ok) {
-            return serveLocalUploadFallback(staticPath, upstream.status, upstream.statusText);
+            return new Response(upstream.body, {
+                status: upstream.status,
+                statusText: upstream.statusText,
+                headers: {
+                    "cache-control": "private, no-store",
+                },
+            });
         }
 
         // 复制响应头
@@ -41,8 +54,7 @@ export async function GET(
         if (contentDisposition) headers.set("content-disposition", contentDisposition);
         if (contentLength) headers.set("content-length", contentLength);
         
-        // 设置缓存头
-        headers.set("cache-control", "public, max-age=31536000, immutable");
+        headers.set("cache-control", "private, no-store");
 
         return new Response(upstream.body, {
             status: upstream.status,
@@ -51,52 +63,11 @@ export async function GET(
         });
     } catch (error) {
         console.error("Static file proxy error:", error);
-        return serveLocalUploadFallback(staticPath, 500, "Failed to fetch static file");
+        return new Response("Failed to fetch static file", {
+            status: 500,
+            headers: {
+                "cache-control": "private, no-store",
+            },
+        });
     }
-}
-
-async function serveLocalUploadFallback(
-    staticPath: string,
-    status: number,
-    statusText: string
-) {
-    const fileName = decodeURIComponent(path.basename(staticPath));
-    const candidates = [
-        path.resolve(process.cwd(), "../app/uploads", fileName),
-        path.resolve(process.cwd(), "app/uploads", fileName),
-        path.resolve(process.cwd(), "uploads", fileName),
-    ];
-
-    for (const candidate of candidates) {
-        try {
-            const file = await readFile(candidate);
-            return new Response(new Uint8Array(file), {
-                status: 200,
-                headers: {
-                    "content-type": contentTypeFor(fileName),
-                    "cache-control": "public, max-age=31536000, immutable",
-                },
-            });
-        } catch {
-        }
-    }
-
-    return new Response(`File not found: ${staticPath}`, {
-        status,
-        statusText,
-    });
-}
-
-function contentTypeFor(fileName: string) {
-    const ext = path.extname(fileName).toLowerCase();
-    if (ext === ".docx") {
-        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-    }
-    if (ext === ".pdf") {
-        return "application/pdf";
-    }
-    if (ext === ".txt") {
-        return "text/plain; charset=utf-8";
-    }
-    return "application/octet-stream";
 }

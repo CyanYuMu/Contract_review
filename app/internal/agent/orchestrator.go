@@ -24,10 +24,6 @@ type ReviewOrchestrator struct {
 	suggestionAgent *SuggestionAgent
 	qualityGate     *QualityGate
 	config          OrchestratorConfig
-
-	// SSE 回调 — 用于实时向前端推送 Agent 执行状态
-	onProgress func(event ProgressEvent)
-	onFinding  func(finding RiskFinding)
 }
 
 // ProgressEvent 进度事件（用于 SSE 推送）
@@ -39,6 +35,14 @@ type ProgressEvent struct {
 	Data      interface{} `json:"data,omitempty"`
 	Progress  float64     `json:"progress"` // 0.0-1.0
 	Timestamp time.Time   `json:"timestamp"`
+}
+
+// ReviewCallbacks belongs to one review invocation. Keeping callbacks in the
+// call scope makes a shared ReviewOrchestrator safe to reuse across concurrent
+// review runs without one request overwriting another request's SSE sink.
+type ReviewCallbacks struct {
+	OnProgress func(event ProgressEvent)
+	OnFinding  func(finding RiskFinding)
 }
 
 // NewReviewOrchestrator 创建审阅编排器
@@ -63,20 +67,9 @@ func NewReviewOrchestrator(
 	}
 }
 
-// SetProgressCallback 设置进度回调
-func (o *ReviewOrchestrator) SetProgressCallback(callback func(ProgressEvent)) {
-	o.onProgress = callback
-}
-
-// SetFindingCallback 设置风险发现回调，用于边审边向前端推送风险卡片。
-func (o *ReviewOrchestrator) SetFindingCallback(callback func(RiskFinding)) {
-	o.onFinding = callback
-}
-
-// emitProgress 发送进度事件
-func (o *ReviewOrchestrator) emitProgress(phase, agent, status, message string, progress float64, data interface{}) {
-	if o.onProgress != nil {
-		o.onProgress(ProgressEvent{
+func (c ReviewCallbacks) emitProgress(phase, agent, status, message string, progress float64, data interface{}) {
+	if c.OnProgress != nil {
+		c.OnProgress(ProgressEvent{
 			Phase:     phase,
 			Agent:     agent,
 			Status:    status,
@@ -88,9 +81,9 @@ func (o *ReviewOrchestrator) emitProgress(phase, agent, status, message string, 
 	}
 }
 
-func (o *ReviewOrchestrator) emitFinding(finding RiskFinding) {
-	if o.onFinding != nil {
-		o.onFinding(finding)
+func (c ReviewCallbacks) emitFinding(finding RiskFinding) {
+	if c.OnFinding != nil {
+		c.OnFinding(finding)
 	}
 }
 
@@ -99,6 +92,7 @@ func (o *ReviewOrchestrator) ReviewContract(
 	ctx context.Context,
 	contractText string,
 	meta ContractMeta,
+	callbacks ReviewCallbacks,
 ) (*ReviewReport, error) {
 	startTime := time.Now()
 
@@ -112,10 +106,10 @@ func (o *ReviewOrchestrator) ReviewContract(
 		zap.String("stance", meta.Stance))
 
 	// ============ Phase 1: 准备阶段 ============
-	o.emitProgress("prepare", "Orchestrator", "running", "正在准备审阅...", 0.05, nil)
+	callbacks.emitProgress("prepare", "Orchestrator", "running", "正在准备审阅...", 0.05, nil)
 
 	// ============ Phase 2: 条款拆分（ClauseAgent） ============
-	o.emitProgress("clause_split", "ClauseAgent", "running", "正在进行智能条款拆分...", 0.1, nil)
+	callbacks.emitProgress("clause_split", "ClauseAgent", "running", "正在进行智能条款拆分...", 0.1, nil)
 
 	clauseOutput, err := o.clauseAgent.Execute(ctx, AgentInput{
 		Task: "智能条款拆分",
@@ -135,14 +129,14 @@ func (o *ReviewOrchestrator) ReviewContract(
 	report.Clauses = clauses
 	report.TokensUsed += clauseOutput.TokensUsed
 
-	o.emitProgress("clause_split", "ClauseAgent", "completed",
+	callbacks.emitProgress("clause_split", "ClauseAgent", "completed",
 		fmt.Sprintf("条款拆分完成，共 %d 个条款", len(clauses)), 0.2, clauses)
 
 	global.Log.Info("Phase 2 完成",
 		zap.Int("clauseCount", len(clauses)))
 
 	// ============ Phase 3: 风险识别（知识库候选驱动 DAG） ============
-	o.emitProgress("risk_identify", "CandidateRiskAgent", "running",
+	callbacks.emitProgress("risk_identify", "CandidateRiskAgent", "running",
 		fmt.Sprintf("正在检索 %d 个条款的知识库候选风险点...", len(clauses)), 0.25, nil)
 
 	findings, riskSteps, err := o.riskAgent.ExecuteBatchWithCallback(
@@ -154,7 +148,7 @@ func (o *ReviewOrchestrator) ReviewContract(
 			if total > 0 {
 				progress += 0.15 * float64(completed) / float64(total)
 			}
-			o.emitProgress("candidate_retrieve", "CandidateRiskAgent", "running",
+			callbacks.emitProgress("candidate_retrieve", "CandidateRiskAgent", "running",
 				fmt.Sprintf("依据命中: 条款 %d/%d，候选 %d 条", completed, total, len(candidates)),
 				progress,
 				map[string]interface{}{
@@ -187,16 +181,16 @@ func (o *ReviewOrchestrator) ReviewContract(
 				"finding_count":     len(clauseFindings),
 				"verified_count":    countVerified(clauseFindings),
 			}
-			o.emitProgress("risk_identify", "CandidateRiskAgent", "running",
+			callbacks.emitProgress("risk_identify", "CandidateRiskAgent", "running",
 				fmt.Sprintf("条款审阅进度: %d/%d，候选 %d 条，本条发现 %d 个风险点", completed, total, len(candidates), len(clauseFindings)),
 				progress,
 				data)
 			for _, finding := range clauseFindings {
-				o.emitProgress("risk_identify", "CandidateRiskAgent", "running",
+				callbacks.emitProgress("risk_identify", "CandidateRiskAgent", "running",
 					fmt.Sprintf("命中风险: %s (%s)，依据 %d 条", finding.RiskType, finding.RiskLevel, len(finding.LegalBasis)),
 					progress,
 					progressDataFromFinding(finding))
-				o.emitFinding(finding)
+				callbacks.emitFinding(finding)
 			}
 		},
 	)
@@ -213,7 +207,7 @@ func (o *ReviewOrchestrator) ReviewContract(
 		}
 	}
 
-	o.emitProgress("risk_identify", "CandidateRiskAgent", "completed",
+	callbacks.emitProgress("risk_identify", "CandidateRiskAgent", "completed",
 		fmt.Sprintf("风险识别完成: %d 个风险点 (%d 个已验证)", len(findings), verifiedCount), 0.6,
 		map[string]int{"total": len(findings), "verified": verifiedCount})
 
@@ -223,12 +217,12 @@ func (o *ReviewOrchestrator) ReviewContract(
 		zap.Int("stepsCount", len(riskSteps)))
 
 	// ============ Phase 4: 修改建议（SuggestionAgent） ============
-	o.emitProgress("suggestion", "SuggestionAgent", "running",
+	callbacks.emitProgress("suggestion", "SuggestionAgent", "running",
 		"正在生成修改建议...", 0.65, nil)
 
 	if suggestions := suggestionsFromFindings(findings); len(suggestions) == len(findings) {
 		report.Suggestions = suggestions
-		o.emitProgress("suggestion", "CandidateRiskAgent", "completed",
+		callbacks.emitProgress("suggestion", "CandidateRiskAgent", "completed",
 			fmt.Sprintf("修改建议随批量审阅生成完成: %d 条建议", len(report.Suggestions)), 0.8, nil)
 	} else {
 		suggestionOutput, err := o.suggestionAgent.Execute(ctx, AgentInput{
@@ -251,7 +245,7 @@ func (o *ReviewOrchestrator) ReviewContract(
 		}
 	}
 
-	o.emitProgress("suggestion", "SuggestionAgent", "completed",
+	callbacks.emitProgress("suggestion", "SuggestionAgent", "completed",
 		fmt.Sprintf("修改建议生成完成: %d 条建议", len(report.Suggestions)), 0.8, nil)
 
 	global.Log.Info("Phase 4 完成",
@@ -261,7 +255,7 @@ func (o *ReviewOrchestrator) ReviewContract(
 	// 说明: 真正的 Reflection 重试（依据反馈重新审阅遗漏条款）尚未实现。
 	// 此前 for retry 循环在 ShouldReflect 命中后并未重新调用 RiskAgent，仅空转更新计数，
 	// 故此处改为单次质量评估，产出评分与关键缺口供前端展示与人工复核，不再空转。
-	o.emitProgress("quality", "QualityGate", "running",
+	callbacks.emitProgress("quality", "QualityGate", "running",
 		"正在进行质量评估...", 0.85, nil)
 
 	report.ReflectionCount = 0
@@ -272,19 +266,19 @@ func (o *ReviewOrchestrator) ReviewContract(
 		global.Log.Info("质量评估结果",
 			zap.Float64("score", eval.OverallScore),
 			zap.Strings("gaps", eval.CriticalGaps))
-		o.emitProgress("quality", "QualityGate", "completed",
+		callbacks.emitProgress("quality", "QualityGate", "completed",
 			fmt.Sprintf("质量评估完成 (评分: %.2f)", eval.OverallScore), 0.9, eval)
 	}
 
 	// ============ Phase 6: 报告生成 ============
-	o.emitProgress("report", "Orchestrator", "running",
+	callbacks.emitProgress("report", "Orchestrator", "running",
 		"正在生成审阅报告...", 0.95, nil)
 
 	report.OverallRisk = calculateOverallRisk(report.Findings)
 	report.Summary = generateSummary(report)
 	report.Duration = time.Since(startTime)
 
-	o.emitProgress("report", "Orchestrator", "completed",
+	callbacks.emitProgress("report", "Orchestrator", "completed",
 		"审阅完成", 1.0, report)
 
 	global.Log.Info("ReviewOrchestrator 审阅完成",

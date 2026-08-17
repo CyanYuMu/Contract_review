@@ -33,8 +33,8 @@ func NewSessionHandler(sessionService *SessionService) *SessionHandler {
 // @Router /api/session/create [post]
 func (h *SessionHandler) CreateSession(ctx context.Context, c *app.RequestContext) {
 	// 1. 验证用户登录状态
-	userIDStr := middleware.GetCurrentUserID(c)
-	if userIDStr == "" {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		global.Log.Error("用户未登录")
 		c.JSON(401, response.Unauthorized())
 		return
@@ -49,7 +49,7 @@ func (h *SessionHandler) CreateSession(ctx context.Context, c *app.RequestContex
 	}
 
 	// 3. 创建会话
-	session, err := h.sessionService.CreateSession(ctx, userIDStr, &req)
+	session, err := h.sessionService.CreateSession(ctx, scope.Account, &req)
 	if err != nil {
 		global.Log.Error("创建会话失败", zap.Error(err))
 		c.JSON(500, response.FailWithMsg(err.Error()))
@@ -78,16 +78,12 @@ func (h *SessionHandler) CreateSession(ctx context.Context, c *app.RequestContex
 // @Router /api/session/list [post]
 func (h *SessionHandler) ListSessions(ctx context.Context, c *app.RequestContext) {
 	// 1. 验证用户登录状态
-	userIDStr := middleware.GetCurrentUserID(c)
-	if userIDStr == "" {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		c.JSON(401, response.Unauthorized())
 		return
 	}
-	userID, err := h.sessionService.ResolveUserID(ctx, userIDStr)
-	if err != nil {
-		c.JSON(401, response.Unauthorized())
-		return
-	}
+	userID := scope.UserID
 
 	// 2. 绑定请求参数
 	var req ListSessionsRequest
@@ -128,16 +124,12 @@ func (h *SessionHandler) ListSessions(ctx context.Context, c *app.RequestContext
 // @Router /api/session/title [put]
 func (h *SessionHandler) UpdateSessionTitle(ctx context.Context, c *app.RequestContext) {
 	// 1. 验证用户登录状态
-	userIDStr := middleware.GetCurrentUserID(c)
-	if userIDStr == "" {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		c.JSON(401, response.Unauthorized())
 		return
 	}
-	userID, err := h.sessionService.ResolveUserID(ctx, userIDStr)
-	if err != nil {
-		c.JSON(401, response.Unauthorized())
-		return
-	}
+	userID := scope.UserID
 
 	// 2. 绑定请求参数
 	var req UpdateSessionTitleRequest
@@ -175,16 +167,12 @@ func (h *SessionHandler) UpdateSessionTitle(ctx context.Context, c *app.RequestC
 // @Router /api/session/delete [post]
 func (h *SessionHandler) DeleteSession(ctx context.Context, c *app.RequestContext) {
 	// 1. 验证用户登录状态
-	userIDStr := middleware.GetCurrentUserID(c)
-	if userIDStr == "" {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		c.JSON(401, response.Unauthorized())
 		return
 	}
-	userID, err := h.sessionService.ResolveUserID(ctx, userIDStr)
-	if err != nil {
-		c.JSON(401, response.Unauthorized())
-		return
-	}
+	userID := scope.UserID
 
 	// 2. 绑定请求参数
 	var req DeleteSessionRequest
@@ -212,11 +200,12 @@ func (h *SessionHandler) DeleteSession(ctx context.Context, c *app.RequestContex
 // @Router /api/session/history [post]
 func (h *SessionHandler) GetSessionHistoryDetail(ctx context.Context, c *app.RequestContext) {
 	// 1. 验证用户登录状态
-	userIDStr := middleware.GetCurrentUserID(c)
-	if userIDStr == "" {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
 		c.JSON(401, response.Unauthorized())
 		return
 	}
+	userID := scope.UserID
 
 	// 2. 绑定请求参数
 	var req SessionHistoryDetailRequest
@@ -226,7 +215,7 @@ func (h *SessionHandler) GetSessionHistoryDetail(ctx context.Context, c *app.Req
 	}
 
 	// 3. 获取会话历史详情
-	detail, err := h.sessionService.GetSessionHistoryDetail(ctx, req.SessionID)
+	detail, err := h.sessionService.GetSessionHistoryDetail(ctx, userID, req.SessionID)
 	if err != nil {
 		c.JSON(404, response.FailWithMsg(err.Error()))
 		return
@@ -243,6 +232,12 @@ func (h *SessionHandler) GetSessionHistoryDetail(ctx context.Context, c *app.Req
 // @Success 200 {object} SessionResponse
 // @Router /api/session/:id [get]
 func (h *SessionHandler) GetSessionByID(ctx context.Context, c *app.RequestContext) {
+	scope, ok := middleware.GetScope(c)
+	if !ok {
+		c.JSON(401, response.Unauthorized())
+		return
+	}
+	userID := scope.UserID
 	idStr := c.Param("id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -250,7 +245,7 @@ func (h *SessionHandler) GetSessionByID(ctx context.Context, c *app.RequestConte
 		return
 	}
 
-	session, err := h.sessionService.GetSessionByID(ctx, id)
+	session, err := h.sessionService.GetSessionByID(ctx, userID, id)
 	if err != nil {
 		c.JSON(500, response.ServerError())
 		return

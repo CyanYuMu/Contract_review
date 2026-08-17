@@ -19,13 +19,14 @@ type RefreshClaims struct {
 	jwt.RegisteredClaims
 }
 
-func GenerateAccessToken(account string, username string) (string, error) {
+func GenerateAccessToken(account string, username string, roles ...string) (string, error) {
 	cfg := global.Config.JWT
 	now := time.Now()
 
 	claims := AccessClaims{
 		Account:  account,
 		Username: username,
+		Roles:    roles,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt: jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(

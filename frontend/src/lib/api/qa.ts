@@ -8,7 +8,11 @@ import type {QAAskRequest, QAAskCallbacks, QAMessage, ContractListItem} from '@/
  * POST /api/proxy/qa/ask  {session_id, message}
  * 后端 SSE 事件：delta{content} / error{message} / end{message_id,tokens,cache_hit}
  */
-export const askQuestion = async (req: QAAskRequest, callbacks: QAAskCallbacks): Promise<void> => {
+export const askQuestion = async (
+    req: QAAskRequest,
+    callbacks: QAAskCallbacks,
+    signal?: AbortSignal
+): Promise<void> => {
     const token = getAuthToken();
 
     const response = await fetch('/api/proxy/qa/ask', {
@@ -19,6 +23,7 @@ export const askQuestion = async (req: QAAskRequest, callbacks: QAAskCallbacks):
             ...(token && {Authorization: `Bearer ${token}`}),
             Accept: 'text/event-stream',
         },
+        signal,
     });
 
     if (!response.ok) {
@@ -33,8 +38,9 @@ export const askQuestion = async (req: QAAskRequest, callbacks: QAAskCallbacks):
     }
 
     if (!response.body) {
-        callbacks.onError?.(new Error('无响应流'));
-        return;
+        const error = new Error('无响应流');
+        callbacks.onError?.(error);
+        throw error;
     }
 
     const reader = response.body.getReader();
@@ -81,6 +87,12 @@ export const askQuestion = async (req: QAAskRequest, callbacks: QAAskCallbacks):
             if (done) {
                 const remaining = buffer + decoder.decode();
                 if (remaining.trim()) handleEvent(remaining);
+                if (!ended) {
+                    const error = new Error('问答连接意外中断，未收到结束事件');
+                    callbacks.onError?.(error);
+                    ended = true;
+                    throw error;
+                }
                 break;
             }
             buffer += decoder.decode(value, {stream: true});
@@ -95,6 +107,9 @@ export const askQuestion = async (req: QAAskRequest, callbacks: QAAskCallbacks):
             }
         }
     } catch (error) {
+        if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+            throw error;
+        }
         if (!ended) callbacks.onError?.(error as Error);
         throw error;
     }
