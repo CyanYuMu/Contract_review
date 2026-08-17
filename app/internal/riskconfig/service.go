@@ -245,11 +245,42 @@ func syncKnowledgeDoc(ctx context.Context, tx *gorm.DB, riskPoint *RiskPoint) (u
 		ChunkIndex: 0,
 		Content:    content,
 		VectorID:   fmt.Sprintf("risk-%d-chunk-0", riskPoint.ID),
+		Metadata:   buildRiskPointMetadataJSON(riskPoint),
 	}
 	if err := tx.WithContext(ctx).Create(&chunk).Error; err != nil {
 		return 0, err
 	}
 	return doc.ID, nil
+}
+
+// buildRiskPointMetadata 将风险点的结构化字段构建为分块元数据。
+// RAG 命中后直接读取这些字段，避免从 buildKnowledgeContent 拍扁的文本里再正则反解。
+// keywords / applicable_clauses 存"、"连接串，与 splitListField 的分隔符保持一致。
+func buildRiskPointMetadata(riskPoint *RiskPoint) map[string]string {
+	keywords := decodeStringList(riskPoint.Keywords)
+	applicableClauses := decodeStringList(riskPoint.ApplicableClauses)
+	return map[string]string{
+		"risk_id":              riskCode(riskPoint.ID),
+		"contract_type":        riskPoint.ContractTypeName,
+		"risk_type":            riskPoint.RiskType,
+		"risk_level":           riskPoint.RiskLevel,
+		"applicable_scope":     riskPoint.ApplicableScope,
+		"trigger_condition":    riskPoint.TriggerCondition,
+		"keywords":             strings.Join(keywords, "、"),
+		"applicable_clauses":   strings.Join(applicableClauses, "、"),
+		"legal_basis":          riskPoint.LegalBasis,
+		"recommended_template": riskPoint.RecommendedTemplate,
+		"risk_content":         riskPoint.RiskContent,
+	}
+}
+
+// buildRiskPointMetadataJSON 将结构化元数据序列化为 JSON 字符串写入分块 metadata 列。
+func buildRiskPointMetadataJSON(riskPoint *RiskPoint) string {
+	b, err := json.Marshal(buildRiskPointMetadata(riskPoint))
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 func deleteKnowledgeDoc(ctx context.Context, tx *gorm.DB, docID uint64) error {
