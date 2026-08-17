@@ -112,15 +112,18 @@ requiresHumanReview := raw.RequiresHumanReview || !verified
 ### P0 收尾（可选，低风险）
 - [ ] **旧风险点补 metadata**：已存在的风险点（如当前库里的 `RP000001`）其 chunk metadata 仍为 NULL。可写一次性迁移脚本，遍历 `review_risk_points` 重新执行 `syncKnowledgeDoc`（等价于逐条 update），让存量数据也享受结构化 metadata。
 
-### P1-1 真混合检索（召回精度）
-- [ ] `SimpleKeywordIndex.Search` 从"TF 匹配"升级为**含 IDF 的 BM25**，或启用 Milvus 2.5 原生 BM25（`milvus_store.go` 已预留注释）。
-- [ ] 启用 Rerank（config 已有 `gte-rerank-v2`），保留现有阈值降级护栏。
+### P1-1 真混合检索（召回精度）— ✅ 已完成
+- [x] `SimpleKeywordIndex.Search` 从"TF 子串匹配"升级为**含 IDF 的 BM25**（k1=1.2, b=0.75），分数经 `score/(score+norm)` 归一化到 (0,1)。
+- [x] 统一 `tokenize`：查询/文档共用 CJK bigram + 法律关键词 + 词/标点切分，保证 term 跨查询/文档匹配。
+- [~] Rerank 已代码实现且 dev 配置 `rerank.enabled=true`（配置驱动，非本阶段代码改动）。
+- [ ]（可选）Milvus 2.5 原生 BM25 替代 LIKE 全文检索（基础设施升级，非代码层）。
 
-### P1-2 父子分块（召回 + 上下文完整性，呼应 WeKnora）
-- [ ] 落地 `Chunk.ParentChunkID` / `ChunkType("parent"/"child")`（`rag/types.go` 字段已备好但未赋值）。
-- [ ] 小子块（~300–500 字）做向量/关键词召回，命中后按 `ParentChunkID` 回填父块（整章/整条）拼进 prompt。
-- [ ] `review_knowledge_chunks` 表加 `parent_chunk_id / chunk_type` 列（迁移）。
-- [ ] 法规/长指引文档走 `DocumentProcessor`（当前为死代码，需接线或删）。
+### P1-2 父子分块（召回 + 上下文完整性，呼应 WeKnora）— ✅ 已完成
+- [x] 落地 `Chunk.ParentChunkID` / `Chunk.ChunkType` / `SearchResult.ParentChunkID`（含 child/parent 常量）。
+- [x] 小子块（maxChunkSize=300、带 overlap、句末断句）用于检索，命中后按 `ParentChunkID` 回填父块（整章/整条）并按 parent 去重。
+- [x] `review_knowledge_chunks` 表加 `parent_chunk_id / chunk_type` 列（迁移）。
+- [x] `DocumentProcessor` 复活为父子分块产出器（child 检索 + parent 上下文，仅 child 生成 embedding）。
+- [ ]（待接）长文档实际入库入口：当前知识库入口为风险点自动同步 + 种子 SQL，`DocumentProcessor` 已就绪，后续新增知识库文档上传 API 或长文档入库时调用。
 
 ### P1-3 自适应检索 / Self-RAG（性能 + 精度，轻量路由）
 - [ ] **条款级路由（确定性）**：`classifyClauses` 后跳过首部/签署页/送达通知等 boilerplate 条款，不检索不审阅。
@@ -135,7 +138,7 @@ requiresHumanReview := raw.RequiresHumanReview || !verified
 
 ### P2 性能与清理
 - [ ] 网关语义缓存对 review 跳过（`gateway.go` 中 `Feature == FeatureReview` 跳过 cache lookup/store）。
-- [ ] 清理死代码：`RiskAgent`/`react_loop.go`/`rule_verifier_tool.go`/`DocumentProcessor`/`buildEnhancedCandidateQuery` —— 接线或删除，消除文档与代码脱节。
+- [ ] 清理死代码：`RiskAgent`/`react_loop.go`/`rule_verifier_tool.go`/`buildEnhancedCandidateQuery` —— 接线或删除，消除文档与代码脱节（`DocumentProcessor` 已在 P1-2 复活）。
 
 ---
 
@@ -151,3 +154,60 @@ requiresHumanReview := raw.RequiresHumanReview || !verified
 | `docs/sql/review_knowledge.sql` | 分块表增 `metadata` 列 + 老库补列注释 |
 | `app/internal/agent/candidate_risk_agent_test.go`（新增） | 6 个单测 |
 | `app/internal/riskconfig/service_test.go`（新增） | 1 个单测 |
+
+---
+
+## 七、P1 落地记录（真混合检索 + 父子分块）
+
+> 版本 v1.1 | 状态：已完成并验收（编译 + 全量单测 + 启动冒烟通过）
+
+### 7.1 P1-1 真混合检索（BM25 + IDF）
+
+`SimpleKeywordIndex` 从"TF 子串匹配"升级为 **BM25**：
+
+- 每次 `Index` 重建统计：每文档词频、term 文档频率（DF）、平均文档长度。
+- 打分：对查询每个 term 累加 `IDF * tf * (k1+1) / (tf + k1*(1-b+b*dl/avgdl))`，`k1=1.2, b=0.75`。
+- IDF 抑制高频词（"合同/甲方"等），TF 饱和 + 长度归一避免长文刷分。
+- 分数经 `score/(score+1.5)` 归一化到 (0,1)，保持"相关度"语义，兼容 RRF 融合与 `MinRelevance` 过滤。
+- 统一 `tokenize`：查询/文档共用 CJK bigram + 法律关键词 + 英文词 + 标点切分。
+
+### 7.2 P1-2 父子分块（parent-child，参考 WeKnora）
+
+数据流：`DocumentProcessor`（入库时切块）→ `review_knowledge_chunks`（parent/child 标记）→ `LoadKnowledgeChunksFromDB`（读取）→ `PartitionChunks`（分区）→ 检索命中 child → `expandParents`（回填 parent 上下文）。
+
+- **数据模型**：分块表新增 `parent_chunk_id` / `chunk_type`；`Chunk.ChunkType`、`SearchResult.ParentChunkID`、`ChunkTypeParent/Child` 常量。
+- **切块**：`DocumentProcessor` 产出 child 小块（maxChunkSize=300、overlap、句末断句）+ parent 全章；仅 child 生成 embedding。
+- **分区**：`PartitionChunks` 把 parent 从检索单元剥离，child/独立块进入关键词索引与向量库。
+- **回填**：`RAGRetriever.expandParents` 在 final TopK 后把命中 child 回填为 parent 内容，同一 parent 多 child 去重，子块原文存 `metadata["child_content"]` 供追溯。
+- **接线**：`InitOrchestrator` 分区 + `SetParents`；keyword 与向量（Milvus metadata_json）双通道回传 `ParentChunkID`。
+
+### 7.3 验收结果
+
+| 验证项 | 结果 |
+|---|---|
+| `gofmt` / `go build ./...` / `go vet` | 通过 |
+| `go test ./...`（含新增 keyword_index_test.go + parent_child_test.go） | 全部 ok |
+| 启动冒烟（18080，vector 关走关键词路径） | 启动成功、知识库加载 `chunks=1 parents=0`、编排器预热完成 |
+| DB schema 迁移 | `parent_chunk_id` / `chunk_type` 列已生成 |
+
+### 7.4 注意事项
+
+- **存量数据**：现有风险点/种子 chunk 无 parent（空类型=独立 child），不触发回填，行为不变；`DocumentProcessor` 已就绪，待接入长文档入库入口后，长法规/指引即可享受父子分块。
+- **旧库分块表**：需 GORM AutoMigrate 补 `parent_chunk_id`/`chunk_type` 列（启动自动完成，或见 SQL 注释中的 ALTER）。
+- **BM25 分数尺度变化**：关键词通道分数由"匹配率"变为归一化 BM25，RRF 是 rank-based 不受影响；`MinRelevance` 阈值语义仍为 0~1。
+
+### 7.5 P1 改动文件清单
+
+| 文件 | 改动 |
+|---|---|
+| `app/internal/rag/retriever.go` | SimpleKeywordIndex 升级 BM25+IDF；`SetParents`/`expandParents`/`PartitionChunks`；`tokenize` 统一分词 |
+| `app/internal/rag/types.go` | `Chunk.ChunkType`、`SearchResult.ParentChunkID`、`ChunkTypeParent/Child` 常量 |
+| `app/internal/rag/document_processor.go` | 重写为父子分块产出器；修复末尾重叠窗口死循环 |
+| `app/internal/rag/knowledge_loader.go` | 读取 parent/type；`parent_chunk_id` 入 metadata |
+| `app/internal/rag/milvus_store.go` | 向量结果回传 `ParentChunkID` |
+| `app/internal/knowledge/model.go` | `ReviewKnowledgeChunk` 增 `ParentChunkID`/`ChunkType` |
+| `app/internal/knowledge/repo.go` | 查询增 `parent_chunk_id`/`chunk_type` |
+| `app/internal/review/service.go` | `InitOrchestrator` 分区 + `SetParents` |
+| `docs/sql/review_knowledge.sql` | 分块表增列 + 索引 |
+| `app/internal/rag/keyword_index_test.go`（新增） | BM25 检索/过滤/分词单测 |
+| `app/internal/rag/parent_child_test.go`（新增） | 父子产出/分区/回填去重单测 |
