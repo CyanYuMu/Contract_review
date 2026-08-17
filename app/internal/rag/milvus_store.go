@@ -214,13 +214,14 @@ func (s *MilvusVectorStore) Search(query []float32, topK int, filters map[string
 				score = float64(result.Scores[i])
 			}
 			out = append(out, SearchResult{
-				ChunkID:   chunkID,
-				DocID:     columnByNameString(result.Fields, milvusFieldDocID, i),
-				Content:   content,
-				Score:     score,
-				BaseScore: score,
-				Source:    source,
-				Metadata:  metadata,
+				ChunkID:       chunkID,
+				DocID:         columnByNameString(result.Fields, milvusFieldDocID, i),
+				Content:       content,
+				Score:         score,
+				BaseScore:     score,
+				Source:        source,
+				Metadata:      metadata,
+				ParentChunkID: metadata["parent_chunk_id"],
 			})
 		}
 	}

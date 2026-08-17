@@ -26,6 +26,9 @@ type RAGRetriever struct {
 	reranker     Reranker
 	config       RetrieverConfig
 	rerankerCfg  RerankerConfig
+	// parents 父子分块映射：parent chunk ID -> parent chunk。
+	// 检索命中 child 分块后，用 parent 内容补全上下文（见 expandParents）。
+	parents map[string]Chunk
 }
 
 // RAGRetrieverOption 可选的检索器配置
@@ -64,6 +67,11 @@ func NewRAGRetriever(
 		r.config.EnableBM25 = vs.BM25Enabled()
 	}
 	return r
+}
+
+// SetParents 注入父子分块的 parent 映射，供命中 child 分块后回填 parent 上下文。
+func (r *RAGRetriever) SetParents(parents map[string]Chunk) {
+	r.parents = parents
 }
 
 // Retrieve 混合检索主入口
@@ -206,12 +214,64 @@ func (r *RAGRetriever) retrieveWithOverride(query string, filters map[string]str
 		merged = merged[:finalTopK]
 	}
 
+	// Step 7.5: 父子分块回填 —— 命中 child 分块后用 parent 内容补全上下文，并按 parent 去重。
+	if len(r.parents) > 0 {
+		merged = r.expandParents(merged)
+	}
+
 	// Step 8: 阈值过滤 (MinRelevance > 0 时生效)
 	if r.config.MinRelevance > 0 {
 		merged = filterByRelevance(merged, r.config.MinRelevance)
 	}
 
 	return merged, nil
+}
+
+// expandParents 将命中的 child 分块回填为 parent 分块：
+//   - 无父分块的结果原样保留；
+//   - 有父分块的用 parent 内容替换 Content，子块原文存入 metadata["child_content"] 供追溯；
+//   - 同一 parent 命中的多个 child 去重为一条（保留首个）。
+func (r *RAGRetriever) expandParents(results []SearchResult) []SearchResult {
+	out := make([]SearchResult, 0, len(results))
+	seenParent := make(map[string]bool, len(results))
+	for _, res := range results {
+		if res.ParentChunkID == "" {
+			out = append(out, res)
+			continue
+		}
+		parent, ok := r.parents[res.ParentChunkID]
+		if !ok {
+			out = append(out, res)
+			continue
+		}
+		if seenParent[parent.ID] {
+			continue
+		}
+		seenParent[parent.ID] = true
+		if res.Metadata == nil {
+			res.Metadata = map[string]string{}
+		}
+		res.Metadata["child_content"] = res.Content
+		res.Content = parent.Content
+		out = append(out, res)
+	}
+	return out
+}
+
+// PartitionChunks 将分块拆分为「检索单元」与「父分块映射」：
+//   - ChunkType == parent 的分块进入 parents 映射（不参与检索）；
+//   - 其余（child / 空类型独立分块）进入 retrievable 参与检索。
+func PartitionChunks(chunks []Chunk) (retrievable []Chunk, parents map[string]Chunk) {
+	parents = make(map[string]Chunk)
+	retrievable = make([]Chunk, 0, len(chunks))
+	for _, c := range chunks {
+		if c.ChunkType == ChunkTypeParent {
+			parents[c.ID] = c
+			continue
+		}
+		retrievable = append(retrievable, c)
+	}
+	return retrievable, parents
 }
 
 // LayeredRetrieve 分层检索: 先精确匹配合同类型 → 再泛化到通用
@@ -502,14 +562,15 @@ func (ski *SimpleKeywordIndex) Search(query string, topK int, filters map[string
 	results := make([]SearchResult, limit)
 	for i := 0; i < limit; i++ {
 		results[i] = SearchResult{
-			ChunkID:   scored[i].chunk.ID,
-			DocID:     scored[i].chunk.DocID,
-			Content:   scored[i].chunk.Content,
-			Score:     scored[i].score,
-			BaseScore: scored[i].score,
-			Source:    scored[i].chunk.Metadata["source"],
-			Metadata:  scored[i].chunk.Metadata,
-			ChunkType: "keyword",
+			ChunkID:       scored[i].chunk.ID,
+			DocID:         scored[i].chunk.DocID,
+			Content:       scored[i].chunk.Content,
+			Score:         scored[i].score,
+			BaseScore:     scored[i].score,
+			Source:        scored[i].chunk.Metadata["source"],
+			Metadata:      scored[i].chunk.Metadata,
+			ChunkType:     "keyword",
+			ParentChunkID: scored[i].chunk.ParentChunkID,
 		}
 	}
 

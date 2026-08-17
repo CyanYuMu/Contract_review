@@ -344,28 +344,29 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) (*agent.ReviewOrch
 			global.Log.Warn("加载审阅知识库失败，rag_search 将无检索结果", zap.Error(loadErr))
 		} else if len(chunks) > 0 {
 			knowledgeChunks = chunks
-			if err := keywordIndex.Index(chunks); err != nil {
-				global.Log.Warn("审阅知识库入关键词索引失败", zap.Error(err))
-			} else {
-				global.Log.Info("审阅知识库已加载到关键词索引", zap.Int("chunks", len(chunks)))
-			}
 		} else {
 			global.Log.Warn("审阅知识库无已索引分块：请在库表 review_knowledge_* 写入数据并置 status=indexed，或执行 docs/sql/review_knowledge.sql")
 		}
 	} else {
 		global.Log.Warn("global.DB 未初始化，跳过审阅知识库加载")
 	}
-	if len(keywordIndex.SearchableChunks()) == 0 {
+	if len(knowledgeChunks) == 0 {
 		knowledgeChunks = defaultReviewKnowledgeChunks()
-		if err := keywordIndex.Index(knowledgeChunks); err != nil {
-			global.Log.Warn("内置审阅知识入关键词索引失败", zap.Error(err))
-		} else {
-			global.Log.Warn("使用内置审阅知识兜底；建议执行 docs/sql/review_knowledge.sql 写入数据库知识库")
-		}
+		global.Log.Warn("使用内置审阅知识兜底；建议执行 docs/sql/review_knowledge.sql 写入数据库知识库")
+	}
+
+	// 父子分块：parent 分块不参与检索，仅用于 child 命中后回填上下文。
+	retrievableChunks, parentChunks := rag.PartitionChunks(knowledgeChunks)
+	if err := keywordIndex.Index(retrievableChunks); err != nil {
+		global.Log.Warn("审阅知识库入关键词索引失败", zap.Error(err))
+	} else {
+		global.Log.Info("审阅知识库已加载到关键词索引",
+			zap.Int("chunks", len(retrievableChunks)),
+			zap.Int("parents", len(parentChunks)))
 	}
 
 	// ======== Phase 1: 向量检索 + BM25 初始化 ========
-	vectorStore, embedder := s.initVectorRetrieval(ctx, knowledgeChunks)
+	vectorStore, embedder := s.initVectorRetrieval(ctx, retrievableChunks)
 
 	// ======== Phase 1: Reranker 初始化 ========
 	var retrieverOpts []rag.RAGRetrieverOption
@@ -381,6 +382,7 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) (*agent.ReviewOrch
 	}
 
 	ragRetriever := rag.NewRAGRetriever(vectorStore, keywordIndex, embedder, retrieverConfig, retrieverOpts...)
+	ragRetriever.SetParents(parentChunks)
 
 	// ======== Phase 1: Embedding 缓存命中率日志 ========
 	if cachedEmbedder, ok := embedder.(*rag.CachedEmbedder); ok {
