@@ -376,22 +376,69 @@ func mergeAndDedup(a, b []SearchResult) []SearchResult {
 
 // ============ SimpleKeywordIndex (降级关键词索引) ============
 
-// SimpleKeywordIndex 基于内存的关键词索引
-// 用于 BM25 不可用时的降级方案或补充检索通道
+// SimpleKeywordIndex 基于内存的 BM25 关键词索引。
+// 作为向量 / 原生 BM25 不可用时的降级方案，也作为混合检索的关键词通道。
 type SimpleKeywordIndex struct {
+	mu sync.RWMutex
+	// chunks 为检索单元（child / 独立分块，不含 parent 分块）
 	chunks []Chunk
-	mu     sync.RWMutex
+	// BM25 统计（每次 Index 后重建）
+	docCount  int
+	avgDocLen float64
+	docFreq   map[string]int // term -> 包含该 term 的分块数
+	docs      []indexedDoc   // 与 chunks 并行
 }
 
+// indexedDoc 分块的分词统计，用于 BM25 打分。
+type indexedDoc struct {
+	termFreq map[string]int
+	length   int
+}
+
+const (
+	bm25K1 = 1.2
+	bm25B  = 0.75
+	// bm25ScoreNorm 将 BM25 分数归一化到 (0,1)，保持"相关度"语义可读：score/(score+norm)。
+	bm25ScoreNorm = 1.5
+)
+
 func NewSimpleKeywordIndex() *SimpleKeywordIndex {
-	return &SimpleKeywordIndex{}
+	return &SimpleKeywordIndex{docFreq: make(map[string]int)}
 }
 
 func (ski *SimpleKeywordIndex) Index(chunks []Chunk) error {
 	ski.mu.Lock()
 	defer ski.mu.Unlock()
 	ski.chunks = append(ski.chunks, chunks...)
+	ski.rebuildLocked()
 	return nil
+}
+
+// rebuildLocked 重建 BM25 统计（词频、文档频率、平均长度）。调用方需持有写锁。
+func (ski *SimpleKeywordIndex) rebuildLocked() {
+	ski.docs = make([]indexedDoc, len(ski.chunks))
+	ski.docFreq = make(map[string]int)
+	totalLen := 0
+	for i, chunk := range ski.chunks {
+		terms := tokenize(chunk.Content)
+		tf := make(map[string]int, len(terms))
+		seen := make(map[string]bool, len(terms))
+		for _, t := range terms {
+			tf[t]++
+			seen[t] = true
+		}
+		ski.docs[i] = indexedDoc{termFreq: tf, length: len(terms)}
+		totalLen += len(terms)
+		for t := range seen {
+			ski.docFreq[t]++
+		}
+	}
+	ski.docCount = len(ski.chunks)
+	if ski.docCount > 0 {
+		ski.avgDocLen = float64(totalLen) / float64(ski.docCount)
+	} else {
+		ski.avgDocLen = 0
+	}
 }
 
 func (ski *SimpleKeywordIndex) SearchableChunks() []Chunk {
@@ -402,11 +449,10 @@ func (ski *SimpleKeywordIndex) SearchableChunks() []Chunk {
 	return cp
 }
 
-// Search 基于 TF 的关键词检索
-// 中文: CJK bigram + 法律关键词
-// 英文: 单词匹配
+// Search 基于 BM25 的关键词检索。
+// 打分：对每个查询 term 累加 IDF * tf 饱和项；结果分数归一化到 (0,1)。
 func (ski *SimpleKeywordIndex) Search(query string, topK int, filters map[string]string) ([]SearchResult, error) {
-	queryTerms := tokenizeQuery(query)
+	queryTerms := tokenize(query)
 	if len(queryTerms) == 0 {
 		return nil, nil
 	}
@@ -420,22 +466,31 @@ func (ski *SimpleKeywordIndex) Search(query string, topK int, filters map[string
 	}
 	var scored []scoredChunk
 
-	for _, chunk := range ski.chunks {
+	avgdl := ski.avgDocLen
+	if avgdl <= 0 {
+		avgdl = 1
+	}
+
+	for i := range ski.chunks {
+		chunk := ski.chunks[i]
 		if !matchFilters(chunk.Metadata, filters) {
 			continue
 		}
 
-		contentLower := strings.ToLower(chunk.Content)
-		matchCount := 0
+		doc := ski.docs[i]
+		score := 0.0
 		for _, term := range queryTerms {
-			if strings.Contains(contentLower, term) {
-				matchCount++
+			tf := doc.termFreq[term]
+			if tf == 0 {
+				continue
 			}
+			df := ski.docFreq[term]
+			idf := math.Log(1 + (float64(ski.docCount)-float64(df)+0.5)/(float64(df)+0.5))
+			denom := float64(tf) + bm25K1*(1-bm25B+bm25B*float64(doc.length)/avgdl)
+			score += idf * float64(tf) * (bm25K1 + 1) / denom
 		}
-
-		if matchCount > 0 {
-			score := float64(matchCount) / float64(len(queryTerms))
-			scored = append(scored, scoredChunk{chunk: chunk, score: score})
+		if score > 0 {
+			scored = append(scored, scoredChunk{chunk: chunk, score: normalizeBM25(score)})
 		}
 	}
 
@@ -447,13 +502,13 @@ func (ski *SimpleKeywordIndex) Search(query string, topK int, filters map[string
 	results := make([]SearchResult, limit)
 	for i := 0; i < limit; i++ {
 		results[i] = SearchResult{
-			ChunkID:  scored[i].chunk.ID,
-			DocID:    scored[i].chunk.DocID,
-			Content:  scored[i].chunk.Content,
-			Score:    scored[i].score,
+			ChunkID:   scored[i].chunk.ID,
+			DocID:     scored[i].chunk.DocID,
+			Content:   scored[i].chunk.Content,
+			Score:     scored[i].score,
 			BaseScore: scored[i].score,
-			Source:   scored[i].chunk.Metadata["source"],
-			Metadata: scored[i].chunk.Metadata,
+			Source:    scored[i].chunk.Metadata["source"],
+			Metadata:  scored[i].chunk.Metadata,
 			ChunkType: "keyword",
 		}
 	}
@@ -461,8 +516,29 @@ func (ski *SimpleKeywordIndex) Search(query string, topK int, filters map[string
 	return results, nil
 }
 
-func tokenizeQuery(query string) []string {
-	normalized := strings.ToLower(strings.TrimSpace(query))
+// normalizeBM25 将 BM25 分数单调映射到 (0,1) 区间，便于 RRF 融合与相关度展示。
+func normalizeBM25(score float64) float64 {
+	if score <= 0 {
+		return 0
+	}
+	return score / (score + bm25ScoreNorm)
+}
+
+// tokenSplitRe 分词用标点/空白分隔符。
+var tokenSplitRe = regexp.MustCompile(`[[:punct:]\s，。；：、（）《》【】"']+`)
+
+// legalKeywords 法律关键词表，用于把长法律术语作为整词 token（提升精确召回）。
+var legalKeywords = []string{
+	"付款", "支付", "验收", "交付", "违约", "赔偿", "违约金", "解除", "终止",
+	"知识产权", "著作权", "保密", "管辖", "争议", "发票", "逾期", "单方",
+	"服务范围", "服务内容", "质量", "期限", "义务", "责任", "免责",
+	"垄断", "仲裁", "诉讼", "不可抗力", "连带",
+}
+
+// tokenize 将文本分词为检索 token：CJK bigram + 法律关键词 + 英文/数字词 + 标点切分片段。
+// 查询与文档共用同一分词器，保证 term 能跨查询/文档匹配。
+func tokenize(text string) []string {
+	normalized := strings.ToLower(strings.TrimSpace(text))
 	if normalized == "" {
 		return nil
 	}
@@ -482,16 +558,10 @@ func tokenizeQuery(query string) []string {
 		add(term)
 	}
 
-	for _, term := range regexp.MustCompile(`[[:punct:]\s，。；：、（）《》【】"']+`).Split(normalized, -1) {
+	for _, term := range tokenSplitRe.Split(normalized, -1) {
 		add(term)
 	}
 
-	legalKeywords := []string{
-		"付款", "支付", "验收", "交付", "违约", "赔偿", "违约金", "解除", "终止",
-		"知识产权", "著作权", "保密", "管辖", "争议", "发票", "逾期", "单方",
-		"服务范围", "服务内容", "质量", "期限", "义务", "责任", "免责",
-		"垄断", "仲裁", "诉讼", "不可抗力", "连带",
-	}
 	for _, kw := range legalKeywords {
 		if strings.Contains(normalized, kw) {
 			add(kw)
