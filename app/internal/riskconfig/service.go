@@ -178,6 +178,37 @@ func (s *Service) Stats(ctx context.Context, contractTypeName string) (RiskPoint
 	return s.repo.Stats(ctx, contractTypeName)
 }
 
+// BackfillRiskPointMetadata 为存量风险点分块补齐结构化 metadata（P0 收尾迁移）。
+// 幂等：仅更新 metadata 为 NULL 的分块（旧数据），已补齐的不再重复写。
+// 返回实际更新的分块数量。
+func (s *Service) BackfillRiskPointMetadata(ctx context.Context) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, errors.New("riskconfig service: db is nil")
+	}
+
+	var points []RiskPoint
+	if err := s.db.WithContext(ctx).Model(&RiskPoint{}).Find(&points).Error; err != nil {
+		return 0, err
+	}
+
+	updated := 0
+	for _, rp := range points {
+		if rp.KnowledgeDocID == 0 {
+			continue
+		}
+		meta := buildRiskPointMetadataJSON(&rp)
+		res := s.db.WithContext(ctx).
+			Model(&knowledge.ReviewKnowledgeChunk{}).
+			Where("doc_id = ? AND metadata IS NULL", rp.KnowledgeDocID).
+			Update("metadata", meta)
+		if res.Error != nil {
+			return updated, res.Error
+		}
+		updated += int(res.RowsAffected)
+	}
+	return updated, nil
+}
+
 func (s *Service) resolveContractType(ctx context.Context, id uint64, name string) (*contract.ContractType, error) {
 	var contractType contract.ContractType
 	query := s.db.WithContext(ctx)

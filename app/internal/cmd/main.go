@@ -193,6 +193,14 @@ func main() {
 	gatewayHandler := gateway.NewHandler(global.Gateway)
 	qaHandler := qa.NewQAHandler(qaService)
 
+	// P0 收尾：为存量风险点分块补齐结构化 metadata（幂等，仅更新 metadata IS NULL 的分块）。
+	// 必须在预热审阅编排器之前执行，确保关键词/向量索引加载到的是补齐后的 metadata。
+	if n, err := riskPointService.BackfillRiskPointMetadata(ctx); err != nil {
+		global.Log.Warn("存量风险点 metadata 补齐失败", zap.Error(err))
+	} else if n > 0 {
+		global.Log.Info("存量风险点 metadata 已补齐", zap.Int("chunks", n))
+	}
+
 	// 后台预热审阅编排器：提前加载知识库、构建向量索引，避免首次审阅请求等待 2-5 秒。
 	go func() {
 		warmCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
