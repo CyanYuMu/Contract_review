@@ -23,6 +23,8 @@ bin/
 dist/
 build/
 .gocache/
+.npm-cache/
+.playwright-browsers/
 
 # IDE
 .idea/
