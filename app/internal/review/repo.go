@@ -300,7 +300,7 @@ func (r *ReviewResultRepo) GetByID(ctx context.Context, id uint64) (*ReviewResul
 // GetByTaskID 根据任务ID获取审阅结果列表（按索引排序）
 func (r *ReviewResultRepo) GetByTaskID(ctx context.Context, taskID uint64) ([]ReviewResult, error) {
 	var results []ReviewResult
-	err := r.db.WithContext(ctx).Where("task_id = ?", taskID).Order("index ASC").Find(&results).Error
+	err := r.db.WithContext(ctx).Where("task_id = ?", taskID).Order("`index` ASC").Find(&results).Error
 	if err != nil {
 		global.Log.Error("ReviewResultRepo.GetByTaskID failed", zap.Error(err))
 	}
@@ -310,7 +310,7 @@ func (r *ReviewResultRepo) GetByTaskID(ctx context.Context, taskID uint64) ([]Re
 // GetBySessionID 根据会话ID获取审阅结果列表（按索引排序）
 func (r *ReviewResultRepo) GetBySessionID(ctx context.Context, sessionID uint64) ([]ReviewResult, error) {
 	var results []ReviewResult
-	err := r.db.WithContext(ctx).Where("session_id = ?", sessionID).Order("index ASC").Find(&results).Error
+	err := r.db.WithContext(ctx).Where("session_id = ?", sessionID).Order("`index` ASC").Find(&results).Error
 	if err != nil {
 		global.Log.Error("ReviewResultRepo.GetBySessionID failed", zap.Error(err))
 	}
@@ -327,7 +327,7 @@ func (r *ReviewResultRepo) ListByTaskID(ctx context.Context, taskID uint64, offs
 		return nil, 0, err
 	}
 
-	err := r.db.WithContext(ctx).Where("task_id = ?", taskID).Offset(offset).Limit(limit).Order("index ASC").Find(&results).Error
+	err := r.db.WithContext(ctx).Where("task_id = ?", taskID).Offset(offset).Limit(limit).Order("`index` ASC").Find(&results).Error
 	if err != nil {
 		global.Log.Error("ReviewResultRepo.ListByTaskID find failed", zap.Error(err))
 	}
