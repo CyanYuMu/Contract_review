@@ -209,6 +209,9 @@ func (a *CandidateRiskAgent) retrieveCandidates(
 	return results
 }
 
+// generalRetrievalThreshold 首轮检索（含分层）候选数低于该值时触发"泛化二次检索"。
+const generalRetrievalThreshold = 3
+
 func (a *CandidateRiskAgent) retrieveClauseCandidates(ctx context.Context, clause Clause, meta ContractMeta) ([]RiskCandidate, error) {
 	if a.retriever == nil {
 		return nil, nil
@@ -224,6 +227,17 @@ func (a *CandidateRiskAgent) retrieveClauseCandidates(ctx context.Context, claus
 	if err != nil {
 		return nil, err
 	}
+
+	// 检索置信度路由：首轮召回不足时，用"泛化查询"（去标题/正文，只留法律关键词）二次召回，
+	// 避免每条款固定多趟检索，仅在必要时才扩召回。
+	if len(results) < generalRetrievalThreshold {
+		if gq := buildGeneralizedQuery(clause, meta); gq != "" {
+			if more, gErr := a.retriever.RetrieveTopK(gq, nil, a.config.CandidateTopK); gErr == nil {
+				results = append(results, more...)
+			}
+		}
+	}
+
 	candidates := make([]RiskCandidate, 0, len(results))
 	seen := make(map[string]bool)
 	for _, result := range results {
@@ -241,6 +255,30 @@ func (a *CandidateRiskAgent) retrieveClauseCandidates(ctx context.Context, claus
 		}
 	}
 	return candidates, nil
+}
+
+// riskKeywords 用于泛化检索的法律关键词（确定性提取，零 LLM）。
+var riskKeywords = []string{
+	"违约责任", "赔偿", "违约金", "解除", "终止", "知识产权", "著作权", "保密", "争议",
+	"仲裁", "诉讼", "管辖", "付款", "支付", "验收", "交付", "质量", "期限", "发票",
+	"逾期", "单方", "免责", "不可抗力", "变更", "转让", "分包", "连带责任", "保证",
+	"抵押", "合同主体", "权利义务",
+}
+
+// buildGeneralizedQuery 构建泛化检索查询：去掉条款标题/正文，只保留合同类型 + 立场 + 法律关键词。
+func buildGeneralizedQuery(clause Clause, meta ContractMeta) string {
+	var kws []string
+	for _, kw := range riskKeywords {
+		if strings.Contains(clause.Content, kw) {
+			kws = append(kws, kw)
+		}
+	}
+	if len(kws) == 0 {
+		return ""
+	}
+	parts := []string{meta.ContractType, meta.Stance}
+	parts = append(parts, kws...)
+	return strings.Join(nonEmptyStrings(parts), " ")
 }
 
 func (a *CandidateRiskAgent) reviewCandidateBatch(ctx context.Context, batchIndex int, sets []candidateClauseSet, meta ContractMeta, reflectionHints []string) ([]RiskFinding, ThinkStep, error) {
