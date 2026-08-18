@@ -6,7 +6,6 @@ import toast from "react-hot-toast";
 import {FileTextOutlined} from "@ant-design/icons";
 import {upload as uploadApi} from "../lib/api/upload";
 import {UploadStore} from "@/store/uploadStore";
-import {createSession} from "@/lib/api/createSession";
 import {TaskStore} from "@/store/taskStore";
 import {assets} from "@/assets/assets";
 import Image from "next/image";
@@ -27,7 +26,6 @@ export default function ContractUploader({
     const data = UploadStore((e) => e.data);
     const setData = UploadStore((e) => e.setData);
     const resetData = UploadStore((e) => e.resetData);
-    const setTaskSessionId = TaskStore((e) => e.setData);
     const isDocxFile = (file: File | UploadFile) => {
         const fileName = "name" in file ? file.name : "";
         const extension = fileName.toLowerCase().split(".").pop();
@@ -121,27 +119,7 @@ export default function ContractUploader({
                 uploadRes?.id;
             TaskStore.getState().resetData();
 
-            try {
-                const sessionRes = await createSession({
-                    title: title || uploadedFileName || "审阅",
-                    session_type: "review",
-                    file_id: fileId,
-                });
-                const sid =
-                    sessionRes?.session_id ??
-                    sessionRes?.id ??
-                    sessionRes?.data?.session_id ??
-                    sessionRes?.data?.id;
-                const sessionId = Number(sid);
-                if (Number.isFinite(sessionId) && sessionId > 0) {
-                    setTaskSessionId(String(sessionId));
-                    localStorage.setItem("review_session_id", String(sessionId));
-                } else {
-                    console.error("创建会话失败：未返回有效的 session_id");
-                }
-            } catch (error) {
-                console.error("创建会话失败：", error);
-            }
+            // 会话改为在发起审阅时创建（见 ReviewPanel），每次审阅一个独立 session。
             if (fileId) {
                 localStorage.setItem("uploaded_file_id", String(fileId));
             }

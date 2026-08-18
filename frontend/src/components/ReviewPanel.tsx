@@ -5,8 +5,8 @@ import Image from "next/image";
 import {useRouter} from "next/navigation";
 import toast from "react-hot-toast";
 import {startTask} from "@/lib/api/startTask";
+import {createSession} from "@/lib/api/createSession";
 import {RiskResponse, StartTaskRequest} from "@/lib/Interface";
-import {TaskStore} from "@/store/taskStore";
 import {UploadStore} from "@/store/uploadStore";
 import {RiskStore} from "@/store/riskStore";
 import {assets} from "@/assets/assets";
@@ -27,7 +27,6 @@ export default function ReviewPanel({
     const [loading, setLoading] = useState(false);
     const [form] = Form.useForm();
     const {TextArea} = Input;
-    const taskData = TaskStore((e) => e.data);
     const uploadData = UploadStore((e) => e.data);
     const addRiskData = RiskStore((e) => e.addRiskData);
     const setStreaming = RiskStore((e) => e.setStreaming);
@@ -154,17 +153,37 @@ export default function ReviewPanel({
                 return;
             }
 
-            const SessionId: number | undefined =
-                (taskData ? Number(taskData) : undefined) ??
-                sessionId ??
-                (typeof window !== "undefined"
-                    ? Number(localStorage.getItem("review_session_id") || 0)
-                    : undefined);
+            // 每次审阅创建一个新的 session（独立审阅记录，不覆盖历史审阅）
+            let SessionId: number | undefined = sessionId ? Number(sessionId) : undefined;
             if (!SessionId) {
-                toast.error("缺少会话ID，请重新上传合同");
+                try {
+                    const title =
+                        (typeof window !== "undefined"
+                            ? localStorage.getItem("uploaded_file_title")
+                            : undefined) || "审阅";
+                    const sessionRes = await createSession({
+                        title,
+                        session_type: "review",
+                        file_id: storedId,
+                    });
+                    const sid =
+                        sessionRes?.session_id ??
+                        sessionRes?.id ??
+                        sessionRes?.data?.session_id ??
+                        sessionRes?.data?.id;
+                    SessionId = Number(sid);
+                } catch (e) {
+                    console.error("创建审阅会话失败：", e);
+                }
+            }
+            if (!SessionId || !Number.isFinite(SessionId) || SessionId <= 0) {
+                toast.error("创建审阅会话失败，请重试");
                 toast.dismiss("create-task-hint");
                 setLoading(false);
                 return;
+            }
+            if (typeof window !== "undefined") {
+                localStorage.setItem("review_session_id", String(SessionId));
             }
 
             // 获取文件 URL
