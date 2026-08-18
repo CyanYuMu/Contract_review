@@ -182,7 +182,13 @@ export default function QAPanel() {
     // 发送消息（SSE 流式）
     const handleSend = async () => {
         const text = input.trim();
-        if (!text || isStreaming || !currentSessionId) return;
+        if (!text || isStreaming) return;
+        if (!currentSessionId) {
+            // 未选中会话时，引导先新建问答会话（选择合同）
+            message.info('请先新建问答会话并选择合同');
+            openPicker();
+            return;
+        }
         const sessionId = currentSessionId;
         const generation = ++requestGenerationRef.current;
         const controller = new AbortController();
@@ -324,74 +330,81 @@ export default function QAPanel() {
                 </div>
             </div>
 
-            {/* 右侧对话区 */}
+            {/* 右侧对话区：始终展示聊天式输入框，未选会话时引导新建 */}
             <div className="flex-1 flex flex-col bg-gray-50 min-w-0">
-                {!currentSessionId ? (
-                    <div className="flex-1 flex items-center justify-center">
-                        <Empty description="请选择或新建问答会话"/>
-                    </div>
-                ) : (
-                    <>
-                        <div className="flex items-center justify-between px-4 py-2 bg-white border-b border-gray-200">
-                            <span className="text-sm text-gray-500">基于已上传合同的智能问答（支持多轮）</span>
-                            <Button
-                                size="small"
-                                icon={<ClearOutlined/>}
-                                onClick={handleClear}
-                                disabled={isStreaming || messages.length === 0}
-                            >
-                                清空
+                <div className="flex items-center justify-between px-4 py-2 bg-white border-b border-gray-200">
+                    <span className="text-sm text-gray-500">基于已上传合同的智能问答（支持多轮）</span>
+                    {currentSessionId && (
+                        <Button
+                            size="small"
+                            icon={<ClearOutlined/>}
+                            onClick={handleClear}
+                            disabled={isStreaming || messages.length === 0}
+                        >
+                            清空
+                        </Button>
+                    )}
+                </div>
+                <div className="flex-1 overflow-auto p-4 space-y-4">
+                    {!currentSessionId ? (
+                        <div className="h-full flex flex-col items-center justify-center text-center">
+                            <div className="text-4xl mb-3">💬</div>
+                            <p className="text-gray-600 font-medium mb-1">合同智能问答</p>
+                            <p className="text-gray-400 text-sm mb-4">选择左侧会话，或在下方输入框提问后新建会话</p>
+                            <Button type="primary" icon={<PlusOutlined/>} onClick={openPicker}>
+                                新建问答
                             </Button>
                         </div>
-                        <div className="flex-1 overflow-auto p-4 space-y-4">
-                            {loadingMessages ? (
-                                <div className="flex justify-center p-8"><Spin/></div>
-                            ) : (
-                                <>
-                                    {messages.length === 0 && !isStreaming && (
-                                        <div className="flex justify-center p-8">
-                                            <Empty description="向合同提问，例如：这份合同有哪些违约风险？"/>
-                                        </div>
-                                    )}
-                                    {messages.map((m) => (
-                                        <MessageBubble key={m.id} role={m.role} content={m.content}/>
-                                    ))}
-                                    {isStreaming && (
-                                        <MessageBubble role="assistant" content={streamingContent} streaming/>
-                                    )}
-                                    <div ref={messagesEndRef}/>
-                                </>
+                    ) : loadingMessages ? (
+                        <div className="flex justify-center p-8"><Spin/></div>
+                    ) : (
+                        <>
+                            {messages.length === 0 && !isStreaming && (
+                                <div className="flex justify-center p-8">
+                                    <Empty description="向合同提问，例如：这份合同有哪些违约风险？"/>
+                                </div>
                             )}
-                        </div>
-                        <div className="p-3 bg-white border-t border-gray-200">
-                            <div className="flex gap-2 items-end">
-                                <TextArea
-                                    value={input}
-                                    onChange={(e) => setInput(e.target.value)}
-                                    onKeyDown={handleKeyDown}
-                                    placeholder="针对合同内容提问，Enter 发送，Shift+Enter 换行"
-                                    autoSize={{minRows: 1, maxRows: 4}}
-                                    disabled={isStreaming}
-                                    className="flex-1"
-                                />
-                                {isStreaming ? (
-                                    <Button danger icon={<StopOutlined/>} onClick={handleStop}>
-                                        停止
-                                    </Button>
-                                ) : (
-                                    <Button
-                                        type="primary"
-                                        icon={<SendOutlined/>}
-                                        onClick={handleSend}
-                                        disabled={!input.trim()}
-                                    >
-                                        发送
-                                    </Button>
-                                )}
-                            </div>
-                        </div>
-                    </>
-                )}
+                            {messages.map((m) => (
+                                <MessageBubble key={m.id} role={m.role} content={m.content}/>
+                            ))}
+                            {isStreaming && (
+                                <MessageBubble role="assistant" content={streamingContent} streaming/>
+                            )}
+                            <div ref={messagesEndRef}/>
+                        </>
+                    )}
+                </div>
+                <div className="p-3 bg-white border-t border-gray-200">
+                    <div className="flex gap-2 items-end">
+                        <TextArea
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyDown={handleKeyDown}
+                            placeholder={
+                                currentSessionId
+                                    ? "针对合同内容提问，Enter 发送，Shift+Enter 换行"
+                                    : "在此输入问题，Enter 发送后将引导你新建问答会话"
+                            }
+                            autoSize={{minRows: 1, maxRows: 4}}
+                            disabled={isStreaming}
+                            className="flex-1"
+                        />
+                        {isStreaming ? (
+                            <Button danger icon={<StopOutlined/>} onClick={handleStop}>
+                                停止
+                            </Button>
+                        ) : (
+                            <Button
+                                type="primary"
+                                icon={<SendOutlined/>}
+                                onClick={handleSend}
+                                disabled={!input.trim()}
+                            >
+                                发送
+                            </Button>
+                        )}
+                    </div>
+                </div>
             </div>
 
             {/* 合同选择 Modal */}
