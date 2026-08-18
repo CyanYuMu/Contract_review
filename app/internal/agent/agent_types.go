@@ -74,6 +74,7 @@ type Clause struct {
 type RiskFinding struct {
 	FindingID           string       `json:"finding_id,omitempty"`
 	ClauseID            string       `json:"clause_id"`
+	ClauseIDs           []string     `json:"clause_ids,omitempty"` // 跨条款合并后命中的所有条款 ID（含 ClauseID）
 	CandidateIDs        []string     `json:"candidate_ids,omitempty"`
 	RiskType            string       `json:"risk_type"`
 	RiskLevel           string       `json:"risk_level"`

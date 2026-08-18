@@ -814,6 +814,10 @@ func modificationFromFinding(finding agent.RiskFinding, suggestedContent, reason
 func buildRiskAnalysis(finding agent.RiskFinding) string {
 	var sb strings.Builder
 	sb.WriteString(finding.RiskDescription)
+	if len(finding.ClauseIDs) > 1 {
+		sb.WriteString("\n\n命中条款: ")
+		sb.WriteString(strings.Join(finding.ClauseIDs, "、"))
+	}
 	if len(finding.CandidateIDs) > 0 {
 		sb.WriteString("\n\n知识库候选: ")
 		sb.WriteString(strings.Join(finding.CandidateIDs, "、"))

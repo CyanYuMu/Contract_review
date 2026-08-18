@@ -138,17 +138,28 @@ func (a *CandidateRiskAgent) ExecuteBatchWithCallback(
 	}
 
 	var allFindings []RiskFinding
+	for _, set := range candidateSets {
+		allFindings = append(allFindings, findingsByClause[set.clause.ID]...)
+	}
+
+	// 跨条款去重合并：同一风险在多条款命中时归并为一条（保留 ClauseIDs）。
+	// 合并后再按主条款分发回调，保证流式输出与最终报告都用同一份合并结果，避免重复行。
+	mergedFindings := MergeFindings(allFindings)
+	byClause := make(map[string][]RiskFinding, len(mergedFindings))
+	for _, f := range mergedFindings {
+		byClause[f.ClauseID] = append(byClause[f.ClauseID], f)
+	}
+
 	completed := 0
 	for _, set := range candidateSets {
 		completed++
-		clauseFindings := findingsByClause[set.clause.ID]
+		clauseFindings := byClause[set.clause.ID]
 		if onClauseResult != nil {
 			onClauseResult(set.index, set.clause, set.candidates, clauseFindings, completed, len(clauses))
 		}
-		allFindings = append(allFindings, clauseFindings...)
 	}
 
-	return allFindings, allSteps, nil
+	return mergedFindings, allSteps, nil
 }
 
 func (a *CandidateRiskAgent) retrieveCandidates(
