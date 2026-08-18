@@ -386,11 +386,20 @@ func (s *ReviewService) InitOrchestrator(ctx context.Context) (*agent.ReviewOrch
 	if global.Config != nil && global.Config.Vector != nil &&
 		global.Config.Vector.Rerank != nil && global.Config.Vector.Rerank.Enabled {
 		rerankCfg := s.buildRerankerConfig()
-		reranker := rag.NewOpenAIReranker(rerankCfg)
+		// 按 API base 自动选择 reranker 协议：DashScope 走原生端点，其余走 OpenAI 兼容 /rerank。
+		var reranker rag.Reranker
+		rerankType := "openai"
+		if rag.UseDashScopeReranker(rerankCfg.APIBase) {
+			reranker = rag.NewDashScopeReranker(rerankCfg)
+			rerankType = "dashscope"
+		} else {
+			reranker = rag.NewOpenAIReranker(rerankCfg)
+		}
 		retrieverOpts = append(retrieverOpts, rag.WithReranker(reranker, rerankCfg))
 		retrieverConfig.EnableRerank = true
 		global.Log.Info("Reranker 已启用",
 			zap.String("model", rerankCfg.Model),
+			zap.String("type", rerankType),
 			zap.Float64("threshold", rerankCfg.Threshold))
 	}
 
