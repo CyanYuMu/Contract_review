@@ -14,9 +14,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// ReviewOrchestrator 审阅编排主 Agent (Supervisor)
-// 参考 https://www.waylandz.com/ai-agent-book/ 第13章 编排基础
-// 职责: 任务分解 → Agent 调度 → 结果综合 → 质量控制
 type ReviewOrchestrator struct {
 	llmGenerate     func(ctx context.Context, messages []*schema.Message) (*schema.Message, error)
 	clauseAgent     *ClauseAgent
@@ -129,19 +126,24 @@ func (o *ReviewOrchestrator) ReviewContract(
 	report.Clauses = clauses
 	report.TokensUsed += clauseOutput.TokensUsed
 
+	// 条款级路由：跳过首部/签署页/送达等 boilerplate 条款，不检索不审阅。
+	reviewClauses, skipped := filterReviewableClauses(clauses)
+
 	callbacks.emitProgress("clause_split", "ClauseAgent", "completed",
 		fmt.Sprintf("条款拆分完成，共 %d 个条款", len(clauses)), 0.2, clauses)
 
 	global.Log.Info("Phase 2 完成",
-		zap.Int("clauseCount", len(clauses)))
+		zap.Int("clauseCount", len(clauses)),
+		zap.Int("reviewClauseCount", len(reviewClauses)),
+		zap.Int("skippedBoilerplate", skipped))
 
 	// ============ Phase 3: 风险识别（知识库候选驱动 DAG） ============
 	callbacks.emitProgress("risk_identify", "CandidateRiskAgent", "running",
-		fmt.Sprintf("正在检索 %d 个条款的知识库候选风险点...", len(clauses)), 0.25, nil)
+		fmt.Sprintf("正在检索 %d 个条款的知识库候选风险点...", len(reviewClauses)), 0.25, nil)
 
 	findings, riskSteps, err := o.riskAgent.ExecuteBatchWithCallback(
 		ctx,
-		clauses,
+		reviewClauses,
 		meta,
 		func(index int, clause Clause, candidates []RiskCandidate, completed int, total int) {
 			progress := 0.25
@@ -272,7 +274,7 @@ func (o *ReviewOrchestrator) ReviewContract(
 			zap.Int("reflection", report.ReflectionCount),
 			zap.Strings("gaps", eval.CriticalGaps))
 
-		gapClauses := findGapClauses(clauses, report.Findings)
+		gapClauses := findGapClauses(reviewClauses, report.Findings)
 		qualitySignal := eval.ShouldRetry || eval.OverallScore < o.qualityGate.config.ConfidenceThreshold
 		canReflect := o.qualityGate.config.Enabled &&
 			report.ReflectionCount < o.qualityGate.config.MaxRetries &&
@@ -342,6 +344,38 @@ func (o *ReviewOrchestrator) ReviewContract(
 		zap.Int("tokensUsed", report.TokensUsed))
 
 	return report, nil
+}
+
+// boilerplateTitleKeywords 命中标题即视为 boilerplate 条款（首部/签署页/送达等），跳过审阅。
+var boilerplateTitleKeywords = []string{
+	"序言", "首部", "签署页", "签章页", "落款", "签章", "签字盖章", "盖章", "送达",
+}
+
+// isBoilerplateClause 判断条款是否为 boilerplate（无审阅价值），确定性规则、零 LLM。
+func isBoilerplateClause(clause Clause) bool {
+	if clause.ID == "preamble" {
+		return true
+	}
+	title := clause.Title
+	for _, kw := range boilerplateTitleKeywords {
+		if strings.Contains(title, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// filterReviewableClauses 过滤掉 boilerplate 条款，返回可审阅条款与跳过数量。
+func filterReviewableClauses(clauses []Clause) (reviewable []Clause, skipped int) {
+	reviewable = make([]Clause, 0, len(clauses))
+	for _, c := range clauses {
+		if isBoilerplateClause(c) {
+			skipped++
+			continue
+		}
+		reviewable = append(reviewable, c)
+	}
+	return reviewable, skipped
 }
 
 // findGapClauses 返回没有任何风险发现（含 ClauseIDs）覆盖的条款，作为反思重审的"缺口条款"。
