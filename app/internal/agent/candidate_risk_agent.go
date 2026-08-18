@@ -419,7 +419,7 @@ func buildCandidateRiskPrompt(sets []candidateClauseSet, meta ContractMeta, refl
 		ContractMeta:    meta,
 		Clauses:         make([]promptClause, 0, len(sets)),
 		ReflectionHints: reflectionHints,
-		OutputSchema:    `{"findings":[{"finding_id":"clause-id-risk-1","clause_id":"条款ID","candidate_ids":["候选ID"],"risk_type":"风险类型","risk_level":"高/中/低","risk_description":"风险描述","original_text":"原文摘录","legal_basis":[{"source":"来源","article":"条款/风险点ID","content":"依据摘要","relevance":0.8}],"verified":true,"requires_human_review":false,"confidence":0.8,"suggested_text":"可直接替换或补充的条款文本","suggestion_reason":"修改理由","priority":"必须修改/建议修改/可选修改"}]}`,
+		OutputSchema:    `{"findings":[{"finding_id":"clause-id-risk-1","clause_id":"条款ID","candidate_ids":["候选ID"],"risk_type":"风险类型","risk_level":"高/中/低","risk_description":"风险描述","original_text":"逐字复制的合同原文片段（必须与合同原文完全一致，不得改写/摘要/省略，用于前端精确定位）","legal_basis":[{"source":"来源","article":"条款/风险点ID","content":"依据摘要","relevance":0.8}],"verified":true,"requires_human_review":false,"confidence":0.8,"suggested_text":"可直接替换或补充的条款文本","suggestion_reason":"修改理由","priority":"必须修改/建议修改/可选修改"}]}`,
 	}
 	for _, set := range sets {
 		payload.Clauses = append(payload.Clauses, promptClause{
@@ -795,4 +795,5 @@ const candidateRiskSystemPrompt = `你是一名资深合同审查律师。当前
 5. 如果输入中包含 reflection_hints（反思要点），表示上一轮审阅存在遗漏，请优先针对这些要点补充检查这些条款，不要遗漏。
 6. 输入中 contract_meta.overview 提供合同整体结构（全部条款标题与分类），请结合全合同上下文判断跨条款/上下文不一致风险，不要孤立地看单个条款。
 7. 根据 contract_meta.intensity 调整审阅严格度：严格→识别所有潜在风险、宁多勿漏；标准→重点审核心风险领域；宽松→仅指出重大法律风险。
-8. 只输出 JSON，不输出解释性前后缀。`
+8. original_text 必须逐字复制合同原文片段（供前端精确定位与修订），不得改写、摘要、省略或添加任何字符；若该风险是"条款缺失"，original_text 填入缺失位置所在的章节标题原文。
+9. 只输出 JSON，不输出解释性前后缀。`
