@@ -219,4 +219,7 @@ type ContractMeta struct {
 	Stance       string `json:"stance"`
 	Intensity    string `json:"intensity"`
 	Amount       string `json:"amount"`
+	// Overview 合同整体结构摘要（全部条款标题+分类），条款拆分后由编排器回填，
+	// 注入批量审阅提示词，帮助 LLM 结合全合同上下文判断跨条款风险。
+	Overview string `json:"overview,omitempty"`
 }

@@ -129,6 +129,9 @@ func (o *ReviewOrchestrator) ReviewContract(
 	// 条款级路由：跳过首部/签署页/送达等 boilerplate 条款，不检索不审阅。
 	reviewClauses, skipped := filterReviewableClauses(clauses)
 
+	// 合同级上下文：把全合同结构摘要注入 meta，供每个批量审阅结合全貌判断跨条款风险。
+	meta.Overview = buildContractOverview(clauses, meta)
+
 	callbacks.emitProgress("clause_split", "ClauseAgent", "completed",
 		fmt.Sprintf("条款拆分完成，共 %d 个条款", len(clauses)), 0.2, clauses)
 
@@ -376,6 +379,34 @@ func filterReviewableClauses(clauses []Clause) (reviewable []Clause, skipped int
 		reviewable = append(reviewable, c)
 	}
 	return reviewable, skipped
+}
+
+// buildContractOverview 构建合同整体结构摘要（类型/立场/金额 + 全部条款标题与分类），
+// 注入批量审阅提示词，帮助 LLM 结合全合同上下文判断跨条款/上下文不一致风险。
+func buildContractOverview(clauses []Clause, meta ContractMeta) string {
+	var sb strings.Builder
+	if meta.ContractType != "" {
+		fmt.Fprintf(&sb, "合同类型：%s\n", meta.ContractType)
+	}
+	if meta.Stance != "" {
+		fmt.Fprintf(&sb, "审查立场：%s\n", meta.Stance)
+	}
+	if meta.Amount != "" {
+		fmt.Fprintf(&sb, "合同金额：%s\n", meta.Amount)
+	}
+	fmt.Fprintf(&sb, "合同共 %d 个条款：\n", len(clauses))
+	for i, c := range clauses {
+		title := c.Title
+		if strings.TrimSpace(title) == "" {
+			title = c.ID
+		}
+		category := c.Category
+		if category == "" {
+			category = "未分类"
+		}
+		fmt.Fprintf(&sb, "%d. [%s] %s（%s）\n", i+1, c.ID, title, category)
+	}
+	return sb.String()
 }
 
 // findGapClauses 返回没有任何风险发现（含 ClauseIDs）覆盖的条款，作为反思重审的"缺口条款"。
