@@ -64,6 +64,15 @@ func TestBuildGeneralizedQuery(t *testing.T) {
 	}
 }
 
+func TestGeneralizedRetrievalThresholdFor(t *testing.T) {
+	cases := map[string]int{"严格": 5, "宽松": 1, "标准": 3, "": 3, "未知": 3}
+	for intensity, want := range cases {
+		if got := generalizedRetrievalThresholdFor(intensity); got != want {
+			t.Fatalf("intensity=%q 阈值应为 %d，got %d", intensity, want, got)
+		}
+	}
+}
+
 func TestBuildContractOverview(t *testing.T) {
 	clauses := []Clause{
 		{ID: "clause-1", Title: "第一条 服务范围", Category: "权利义务"},
