@@ -125,10 +125,10 @@ requiresHumanReview := raw.RequiresHumanReview || !verified
 - [x] `DocumentProcessor` 复活为父子分块产出器（child 检索 + parent 上下文，仅 child 生成 embedding）。
 - [x] **长文档入库入口**：新增 `rag.IngestKnowledgeDocument`（父子分块 + 持久化，事务内用真实 doc.ID 生成 chunk ID）+ `knowledgeapi` 包（`POST /api/knowledge/document` 管理端接口）。验证：入库长文档 → DB 读出 1 parent + 5 child 全部正确联动，预热日志 `parents=1 child_chunks=5`。
 
-### P1-3 自适应检索 / Self-RAG（性能 + 精度，轻量路由）
-- [ ] **条款级路由（确定性）**：`classifyClauses` 后跳过首部/签署页/送达通知等 boilerplate 条款，不检索不审阅。
-- [ ] **检索置信度路由**：候选为空或最高分低于阈值时才触发二次泛化检索（去标题、扩 TopK、走 Rerank），而非每条款固定检索两趟。
-- [ ] **法律专业问题路由（可选）**：区分"纯审阅规范问题"（付款节点不明）vs"法律专业问题"（违约金上限/竞业期限），后者才触发法规条文级验证。
+### P1-3 自适应检索 / Self-RAG（性能 + 精度，轻量路由）— ✅ 已完成（前两项）
+- [x] **条款级路由（确定性）**：`filterReviewableClauses`/`isBoilerplateClause` 跳过首部/签署页/送达等 boilerplate 条款，不检索不审阅（且反思重审也跳过）。
+- [x] **检索置信度路由**：首轮（含分层）召回 <3 条时，才用 `buildGeneralizedQuery`（去标题/正文、只留法律关键词）二次召回，避免每条款固定多趟检索。
+- [ ]（可选）**法律专业问题路由**：区分"纯审阅规范问题" vs"法律专业问题"，后者才触发法规条文级验证（需轻量分类器，留待后续）。
 
 ### P1-4 跨条款去重合并（报告质量）— ✅ 已完成
 - [x] 新增 `agent.MergeFindings`：按候选风险点 ID（或风险类型+法律依据）归并多条款重复风险，保留 `ClauseIDs`，聚合最严重等级/最高置信度/已验证/待复核，主条款取最早条款。
