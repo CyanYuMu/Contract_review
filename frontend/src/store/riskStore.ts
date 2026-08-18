@@ -156,6 +156,8 @@ export const RiskStore = create<RiskState>()(
       partialize: (state) => ({
         riskDataList: state.riskDataList,
         isCompleted: state.isCompleted,
+        isStreaming: state.isStreaming,
+        replacedNum: state.replacedNum,
         sourceFileUrl: state.sourceFileUrl,
       }),
     }

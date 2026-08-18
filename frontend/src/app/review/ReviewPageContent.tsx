@@ -19,8 +19,9 @@ import {RiskStore} from "@/store/riskStore";
 import ReviewHistory from "@/components/list/ReviewHistory";
 import ContrastHistory from "@/components/list/ContrastHistory";
 import type {TabType} from "@/components/TopbarTabs";
-import type {User,ApiError} from "@/lib/Interface";
+import type {User,ApiError,RiskResponse} from "@/lib/Interface";
 import {getUserInfo} from "@/lib/api/user";
+import {getReviewTaskStatus, getReviewResults} from "@/lib/api/reviewTask";
 import LoginModal from "@/components/auth/LoginModal";
 import {Button, Space} from "antd";
 import {useRouter} from "next/navigation";
@@ -80,6 +81,28 @@ function persistReviewUploadData(uploadData: UploadData) {
     }
 }
 
+// 将后端审阅结果行归一化为 RiskResponse（供刷新后恢复使用）
+function normalizeReviewResults(raw: unknown[], sessionId: number): RiskResponse[] {
+    if (!Array.isArray(raw)) return [];
+    return raw.map((item, idx) => {
+        const it = (item ?? {}) as Record<string, unknown>;
+        return {
+            id: Number(it.id ?? it.risk_id ?? idx + 1),
+            session_id: Number(it.session_id ?? sessionId),
+            task_id: Number(it.task_id ?? 0),
+            index: Number(it.index ?? it.risk_index ?? idx + 1),
+            original_content: (it.original_content ?? "") as string,
+            risk_analysis: (it.risk_analysis ?? "") as string,
+            risk_level: (it.risk_level ?? "") as string,
+            risk_type: (it.risk_type ?? "") as string,
+            suggested_content: (it.suggested_content ?? "") as string,
+            reason: (it.reason ?? "") as string,
+            is_accepted: false,
+            created_at: (it.created_at ?? "") as string,
+        };
+    });
+}
+
 export default function ReviewPageContent() {
     const [activeTab, setActiveTab] = useState<TabType>("check");
     const [user, setUser] = useState<User | null>(null);
@@ -97,6 +120,10 @@ export default function ReviewPageContent() {
     const isStreaming = RiskStore((e) => e.isStreaming);
     const sourceFileUrl = RiskStore((e) => e.sourceFileUrl);
     const resetRiskData = RiskStore((e) => e.resetRiskData);
+    const setRiskDataList = RiskStore((e) => e.setRiskDataList);
+    const setStreaming = RiskStore((e) => e.setStreaming);
+    const setCompleted = RiskStore((e) => e.setCompleted);
+    const addProgressEvent = RiskStore((e) => e.addProgressEvent);
     const data = UploadStore((e) => e.data);
     const setData = UploadStore((e) => e.setData);
     const [restoredUploadData, setRestoredUploadData] = useState<UploadData | null>(null);
@@ -140,6 +167,80 @@ export default function ReviewPageContent() {
             restoreReviewUploadData();
         }
     }, [activeTab, data?.file_url, restoreReviewUploadData]);
+
+    // 刷新恢复：浏览器刷新会中断 SSE，但后端用 context.WithoutCancel 保证审阅任务继续执行。
+    // 这里在挂载时检测「审阅中但未完成」的状态，轮询任务状态与结果直至 completed/failed。
+    useEffect(() => {
+        const sessionId = Number(
+            typeof window !== "undefined" ? localStorage.getItem("review_session_id") || 0 : 0
+        );
+        const initial = RiskStore.getState();
+        if (!sessionId || !initial.isStreaming || initial.isCompleted) return;
+
+        let cancelled = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+
+        const poll = async () => {
+            if (cancelled) return;
+            const task = await getReviewTaskStatus(sessionId);
+            if (cancelled) return;
+
+            const results = await getReviewResults(sessionId);
+            if (cancelled) return;
+
+            if (results.length > 0) {
+                const normalized = normalizeReviewResults(results, sessionId);
+                RiskStore.getState().setRiskDataList(normalized, RiskStore.getState().sourceFileUrl ?? undefined);
+            }
+
+            if (task?.status === "completed") {
+                RiskStore.getState().setStreaming(false);
+                RiskStore.getState().setCompleted(true);
+                addProgressEvent({
+                    phase: "report",
+                    agent: "Orchestrator",
+                    status: "completed",
+                    message: "审阅完成（已恢复）",
+                    progress: 1,
+                    timestamp: new Date().toISOString(),
+                    data: {event_type: "resume_completed"},
+                });
+                return;
+            }
+            if (task?.status === "failed") {
+                RiskStore.getState().setStreaming(false);
+                addProgressEvent({
+                    phase: "report",
+                    agent: "Orchestrator",
+                    status: "failed",
+                    message: "审阅失败",
+                    progress: 1,
+                    timestamp: new Date().toISOString(),
+                    data: {event_type: "resume_failed"},
+                });
+                return;
+            }
+
+            timer = setTimeout(poll, 2000);
+        };
+
+        setStreaming(true);
+        addProgressEvent({
+            phase: "prepare",
+            agent: "ReviewPage",
+            status: "running",
+            message: "检测到进行中的审阅，正在恢复…",
+            progress: 0.05,
+            timestamp: new Date().toISOString(),
+            data: {event_type: "resume_start"},
+        });
+        poll();
+
+        return () => {
+            cancelled = true;
+            if (timer) clearTimeout(timer);
+        };
+    }, [addProgressEvent, setCompleted, setStreaming]);
 
     const effectiveData = data?.file_url ? data : restoredUploadData || data;
     const title = effectiveData?.title ?? "";
