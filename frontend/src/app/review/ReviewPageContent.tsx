@@ -27,6 +27,7 @@ import {useRouter} from "next/navigation";
 import {save as saveApi} from "@/lib/api/upload";
 import {resolveFileUrl} from "@/utils/url";
 import ContractContrastPanel from "@/components/contrast/ContractContrastPanel";
+import QAPanel from "@/components/qa/QAPanel";
 import {authDatedHandler} from "@/utils/authDatedHandler";
 import { buildStaticFileUrl } from '@/utils/url';
 import {waitFor} from "@/utils/waitFor";
@@ -586,6 +587,10 @@ export default function ReviewPageContent() {
                                 />
                             )}
                         </div>
+                    </div>
+                ) : activeTab === 'qa' ? (
+                    <div className="flex-1 overflow-hidden bg-white">
+                        <QAPanel/>
                     </div>
                 ) : activeTab === 'contrast' ? (
                     <div className="flex-1 overflow-hidden">
