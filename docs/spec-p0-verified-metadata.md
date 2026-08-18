@@ -135,8 +135,10 @@ requiresHumanReview := raw.RequiresHumanReview || !verified
 - [x] `ExecuteBatchWithCallback` 在分发回调前合并，流式输出与最终报告一致，避免重复行。
 - [x] `buildRiskAnalysis` 命中多条款时展示"命中条款"列表。
 
-### P1-5 真 Reflection（覆盖率，把质量门反馈注入重审）
-- [ ] `QualityGate` 的 `ShouldReflect` 目前是死代码。改为：`ShouldRetry && CriticalGaps` 非空时，**只对缺口条款定向重审**（把 gaps 注入 `CandidateRiskAgent` 下一轮），`ReflectionCount++`，超过 `MaxRetries` 强制停；不做全量重审。
+### P1-5 真 Reflection（覆盖率，把质量门反馈注入重审）— ✅ 已完成
+- [x] Phase 5 由"单次评估"改为反思循环：质量门评分后，存在无风险发现的缺口条款且质量信号要求重审时，把缺口作为 `reflection_hints` 注入 `CandidateRiskAgent`，**只对缺口条款定向重审**（不做全量重审），合并后重新评估，受 `ReflectionConfig.MaxRetries` 上限约束。
+- [x] 新增 `findGapClauses`（找未被 finding 覆盖的条款）与 `buildReflectionHints`（由 CriticalGaps/Feedback 构建反馈）。
+- [x] 风险审阅链路（`ExecuteBatchWithCallback`/`reviewCandidateBatch`/`buildCandidateRiskPrompt`）支持 `reflectionHints` 注入。
 
 ### P2 性能与清理
 - [ ] 网关语义缓存对 review 跳过（`gateway.go` 中 `Feature == FeatureReview` 跳过 cache lookup/store）。
