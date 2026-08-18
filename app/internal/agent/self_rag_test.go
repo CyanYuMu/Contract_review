@@ -63,3 +63,16 @@ func TestBuildGeneralizedQuery(t *testing.T) {
 		t.Fatal("无法律关键词时应返回空查询")
 	}
 }
+
+func TestBuildContractOverview(t *testing.T) {
+	clauses := []Clause{
+		{ID: "clause-1", Title: "第一条 服务范围", Category: "权利义务"},
+		{ID: "clause-2", Title: "第二条 付款方式", Category: "付款条款"},
+	}
+	overview := buildContractOverview(clauses, ContractMeta{ContractType: "服务合同", Stance: "甲方", Amount: "1000000.00"})
+	for _, want := range []string{"服务合同", "甲方", "1000000.00", "clause-1", "第一条 服务范围", "付款方式", "共 2 个条款"} {
+		if !strings.Contains(overview, want) {
+			t.Fatalf("overview 应包含 %q，got:\n%s", want, overview)
+		}
+	}
+}
