@@ -215,3 +215,46 @@ requiresHumanReview := raw.RequiresHumanReview || !verified
 | `docs/sql/review_knowledge.sql` | 分块表增列 + 索引 |
 | `app/internal/rag/keyword_index_test.go`（新增） | BM25 检索/过滤/分词单测 |
 | `app/internal/rag/parent_child_test.go`（新增） | 父子产出/分区/回填去重单测 |
+
+---
+
+## 8. 审阅流程前端问题修复（P0 缺陷批量修复）
+
+针对审阅流程联调中暴露的 4 个前端/交互缺陷，逐项定位根因并修复，均以 Playwright 自测验证。
+
+### 8.1 问题清单与根因
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| ① | 审阅进度条停滞不动 | 批量 LLM 审阅期间后端不发射进度事件，前端 `currentProgress` 长时间停留在候选检索阶段 | `ExecuteBatchWithCallback` 增 `onBatchProgress(completed,total)`，按批次发射 `正在审阅条款 X/M...`（0.40→0.42 递增）；编排器/反思路径透传回调 |
+| ② | 智审记录进入后未修订内容误显示「已全部修订」 | 前端 `getHistoryDetail` 把 `session_id` 当字符串发送，后端 `SessionHistoryDetailRequest.SessionID` 为 `uint64`，Hertz 绑定失败返回 `400 请求参数错误`；接口又吞掉异常返回 `undefined`，导致 `riskDataList=[]` + `isCompleted=true` | `getHistoryDetail` 统一 `Number(session_id)` 后发送 |
+| ③ | 合同问答界面没有聊天式对话框 | ①未选会话时右侧仅显示「请选择或新建问答会话」空态；②`/review` 工作区的「合同问答」Tab 未接面板，落入编辑器分支 | 问答面板始终渲染聊天式输入框（未选会话发送时引导新建）；`/review` 接入 `QAPanel` |
+| ④ | 从其它界面回审阅页停留在上一份合同、无返回入口 | `/review` 仅无合同时才显示「返回上一页」，有合同时无重新上传/回主页入口 | `/review` 编辑器顶部新增「重新上传」按钮，清空审阅态+上传缓存后回主页 |
+
+### 8.2 关键改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `app/internal/agent/candidate_risk_agent.go` | `ExecuteBatchWithCallback` 增 `onBatchProgress` 参数，每批次回调进度 |
+| `app/internal/agent/orchestrator.go` | Phase 3 与反思循环透传 `onBatchProgress` |
+| `frontend/src/lib/api/getHistoryDetail.ts` | `session_id` 转数字，移除静默吞错 |
+| `frontend/src/components/qa/QAPanel.tsx` | 聊天输入框始终可见；未选会话发送时打开合同选择器 |
+| `frontend/src/app/review/ReviewPageContent.tsx` | 接入 `QAPanel`；新增「重新上传」按钮 |
+
+### 8.3 验收结果（Playwright）
+
+| 验证项 | 结果 |
+|---|---|
+| 后端 SSE 进度事件 | 单次审阅 19 条 progress，含 `正在审阅条款 X/M`、`条款审阅进度 X/Y` |
+| 前端进度条 | 从 `正在启动合同审阅 1%` 推进至 `审阅完成 100%` |
+| 智审记录回看 | `session_history_detail` 返回 200，`/review` 展示 5 条风险点（`hasRisk=true`，无「已全部修订」误显） |
+| 合同问答 | 空态即展示聊天输入框+发送按钮；新建会话后可多轮流式问答 |
+| 重新上传 | 点击后清空状态并跳转 `http://localhost:3000/` |
+
+### 8.4 提交记录
+
+- `c1bcb19` fix(agent): 批量审阅期间按批次上报进度，避免进度条停滞
+- `83b4976` fix(history): 会话详情接口 session_id 转数字，修复智审记录进入后风险列表为空
+- `6753467` fix(qa): 问答面板始终展示聊天式输入框，未选会话时引导新建
+- `3dfc3df` feat(review): 审阅工作区接入合同问答 Tab
+- `8dd6f4d` feat(review): 新增重新上传按钮，清空状态并回到主页
