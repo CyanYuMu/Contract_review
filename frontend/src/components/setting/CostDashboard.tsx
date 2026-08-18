@@ -4,6 +4,7 @@ import React, {useEffect, useRef, useState, useMemo, useCallback} from 'react';
 import {Card, Table, Segmented, Select, Statistic, Row, Col, Spin, Empty, message} from 'antd';
 import * as echarts from 'echarts';
 import {getUsageStats, getUsageTrend, listGatewayRoutes} from '@/lib/api/gateway';
+import {getCachedUser} from '@/utils/userCache';
 import type {UsageStat, DailyUsageTrend, GatewayRoute} from '@/lib/Interface';
 
 const FEATURE_LABELS: Record<string, string> = {
@@ -24,16 +25,23 @@ export default function CostDashboard() {
     const [trend, setTrend] = useState<DailyUsageTrend[]>([]);
     const [routes, setRoutes] = useState<GatewayRoute[]>([]);
     const [loading, setLoading] = useState(false);
+    const [isAdmin, setIsAdmin] = useState(false);
     const chartRef = useRef<HTMLDivElement>(null);
     const chartInstance = useRef<echarts.ECharts | null>(null);
+
+    useEffect(() => {
+        const role = getCachedUser()?.system_role;
+        setIsAdmin(role === 'admin' || role === 'owner');
+    }, []);
 
     const load = useCallback(async () => {
         setLoading(true);
         try {
+            // 模型路由为管理接口，member 无权访问，仅 admin/owner 才请求，避免 403。
             const [s, t, r] = await Promise.all([
                 getUsageStats(dimension, days),
                 getUsageTrend(days),
-                listGatewayRoutes().catch(() => [] as GatewayRoute[]),
+                isAdmin ? listGatewayRoutes().catch(() => [] as GatewayRoute[]) : Promise.resolve([] as GatewayRoute[]),
             ]);
             setStats(s || []);
             setTrend(t || []);
@@ -43,7 +51,7 @@ export default function CostDashboard() {
         } finally {
             setLoading(false);
         }
-    }, [dimension, days]);
+    }, [dimension, days, isAdmin]);
 
     useEffect(() => {
         load();
@@ -162,21 +170,23 @@ export default function CostDashboard() {
                     />
                 </Card>
 
-                <Card title="模型路由（功能 → 模型，在此切换模型无需改动应用代码）" className="mt-4" size="small">
-                    <Table
-                        rowKey="feature"
-                        columns={[
-                            {title: '功能', dataIndex: 'feature', render: featureLabel},
-                            {title: '模型', dataIndex: 'model_name', render: (v: string) => v || '-'},
-                            {title: '参数', dataIndex: 'params', render: (v: string) => v || '-'},
-                            {title: '更新时间', dataIndex: 'updated_at'},
-                        ]}
-                        dataSource={routes}
-                        pagination={false}
-                        size="small"
-                        locale={{emptyText: <Empty description="暂无路由配置"/>}}
-                    />
-                </Card>
+                {isAdmin && (
+                    <Card title="模型路由（功能 → 模型，在此切换模型无需改动应用代码）" className="mt-4" size="small">
+                        <Table
+                            rowKey="feature"
+                            columns={[
+                                {title: '功能', dataIndex: 'feature', render: featureLabel},
+                                {title: '模型', dataIndex: 'model_name', render: (v: string) => v || '-'},
+                                {title: '参数', dataIndex: 'params', render: (v: string) => v || '-'},
+                                {title: '更新时间', dataIndex: 'updated_at'},
+                            ]}
+                            dataSource={routes}
+                            pagination={false}
+                            size="small"
+                            locale={{emptyText: <Empty description="暂无路由配置"/>}}
+                        />
+                    </Card>
+                )}
             </Spin>
         </div>
     );

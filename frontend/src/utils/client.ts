@@ -81,16 +81,10 @@ client.interceptors.response.use(
     (response) => response,
     async (error) => {
         const originalRequest = error.config;
-        
-        // 处理 403 错误：弹出重新登录提示
-        if (error.response?.status === 403) {
-            // 触发 403 错误事件，显示重新登录模态框
-            // authDatedHandler 内部会确保同一时间只弹出一个模态框
-            authDatedHandler.trigger403Error();
-            return Promise.reject(error);
-        }
-        
-        // 如果不是401错误，直接返回错误
+
+        // 403 表示"已登录但无权限"（例如 member 访问管理接口），并非登录过期。
+        // 不应弹"登录已过期"模态框，直接交给调用方处理（展示无权限提示等）。
+        // 只有 401 才代表凭证失效，需要走下方刷新/重新登录逻辑。
         if (error.response?.status !== 401) {
             return Promise.reject(error);
         }
