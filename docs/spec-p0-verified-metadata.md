@@ -258,3 +258,48 @@ requiresHumanReview := raw.RequiresHumanReview || !verified
 - `6753467` fix(qa): 问答面板始终展示聊天式输入框，未选会话时引导新建
 - `3dfc3df` feat(review): 审阅工作区接入合同问答 Tab
 - `8dd6f4d` feat(review): 新增重新上传按钮，清空状态并回到主页
+
+---
+
+## 9. 审阅流程第二轮缺陷修复（刷新恢复 / 原文修订 / 个人中心）
+
+### 9.1 问题与根因
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| ① | 审阅中刷新浏览器后整个审阅状态丢失 | SSE 连接随刷新中断，前端 `isStreaming` 未持久化、无恢复机制；后端虽有 `context.WithoutCancel` 让任务继续跑并落库，但前端不重新拉取 | ①`riskStore` 持久化 `isStreaming/replacedNum`；②`/review` 挂载时检测「审阅中未完成」，轮询 `GET /review/task` 状态 + `GET /review/results/session` 结果直至 completed/failed |
+| ② | 无法在原文修订建议内容（点修订显示「无法定位到该内容」） | docx 导入把文档渲染成 `contenteditable` HTML（`elementList` 为空），编辑器原生 `executeSearch` 对 docx 文档永远返回 0 匹配，`tryEditorAPIReplace` 因此必然失败；原回退仅"高亮"不真正替换 | 新增 `tryCharacterMapperReplace`：用 `CharacterMapper.smartFind` 定位 → `getRange` 取 DOM 范围 → `deleteContents + insertNode` 直接替换原文 |
+| ③ | 成本看板提示"登录已过期"，风险点配置不展示 | ①`/gateway/routes` 为 admin 接口，member 返回 403，但前端拦截器把 403 当作登录过期弹模态框；②风险点配置菜单被 `adminOnlyKeys` 过滤，member 不可见 | ①拦截器改为仅 401 触发登录过期，403 直接抛给调用方；②成本看板按角色判断是否请求模型路由并隐藏该卡片 |
+
+### 9.2 关键改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `app/internal/review/repo.go` | `ORDER BY index` 改为 `` ORDER BY `index` ``（保留字，修复 500） |
+| `frontend/src/store/riskStore.ts` | `partialize` 增加 `isStreaming/replacedNum` |
+| `frontend/src/lib/api/reviewTask.ts`（新增） | `getReviewTaskStatus` / `getReviewResults` |
+| `frontend/src/app/review/ReviewPageContent.tsx` | 挂载时检测并轮询恢复进行中的审阅 |
+| `frontend/src/components/review/RiskCard.v2.tsx` | 新增 `tryCharacterMapperReplace`，`handleReplace` 回退到 DOM 替换 |
+| `frontend/src/utils/client.ts` | 403 不再触发登录过期，仅 401 触发 |
+| `frontend/src/components/setting/CostDashboard.tsx` | 按 `system_role` 条件加载模型路由 |
+
+### 9.3 验收结果（Playwright）
+
+| 验证项 | 结果 |
+|---|---|
+| 刷新恢复 | 模拟审阅中断后进入 `/review`，自动恢复 5 个风险点，无「已全部修订」误显 |
+| 原文修订 | 点击修订后原文「首页响应时间<=2秒…」被移除，修订建议「建议在各项性能指标后补充测量条件…」写入文档，风险卡片 5→4 |
+| 成本看板 | member 进入 `/setting/cost` 无「登录已过期」，正常展示用量统计与趋势，模型路由卡片隐藏 |
+| 后端结果接口 | `GET /review/results/session` 修复保留字后返回 200 |
+
+### 9.4 提交记录
+
+- `69c79ba` fix(review): 审阅结果按 index 排序加反引号，修复保留字导致的 500
+- `c7203d5` feat(review): 刷新后自动恢复进行中的审阅（轮询任务状态与结果）
+- `dd1ea88` fix(review): docx 导入文档改用字符映射器在 DOM 中定位并替换原文
+- `240aa63` fix(setting): 403 无权限不再误报登录过期；成本看板按角色加载模型路由
+
+### 9.5 说明
+
+- **风险点配置/合同类型配置为 admin/owner 专属菜单**（`adminOnlyKeys = ['contractType','risk']`），member 账号按设计不可见。若当前账号需管理员权限，应使用 owner/admin 账号，或将该账号 `system_role` 提升为 admin（`UPDATE users SET system_role='admin' WHERE account='<你的账号>'`）。
+- 修订替换基于 DOM 文本精确匹配（`smartFind` 多级规范化）；LLM 输出的 `original_content` 与文档原文差异过大时仍可能无法定位，会回退到「手动查找」弹窗。
