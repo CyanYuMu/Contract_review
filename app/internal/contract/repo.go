@@ -267,7 +267,9 @@ func (r *ContractRepo) GetContractTypeByID(ctx context.Context, id uint64) (*Con
 	var contractType ContractType
 	err := r.db.WithContext(ctx).First(&contractType, id).Error
 	if err != nil {
-		global.Log.Error("ContractRepo.GetContractTypeByID failed", zap.Error(err))
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			global.Log.Error("ContractRepo.GetContractTypeByID failed", zap.Error(err))
+		}
 		return nil, err
 	}
 	return &contractType, nil
@@ -278,7 +280,10 @@ func (r *ContractRepo) GetContractTypeByName(ctx context.Context, name string) (
 	var contractType ContractType
 	err := r.db.WithContext(ctx).Where("name = ?", name).First(&contractType).Error
 	if err != nil {
-		global.Log.Error("ContractRepo.GetContractTypeByName failed", zap.Error(err))
+		// 类型不存在是正常场景（调用方会创建默认类型），不记 ERROR 避免日志噪音。
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			global.Log.Error("ContractRepo.GetContractTypeByName failed", zap.Error(err))
+		}
 		return nil, err
 	}
 	return &contractType, nil
