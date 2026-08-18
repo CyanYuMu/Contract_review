@@ -528,6 +528,19 @@ export default function ReviewPageContent() {
         }
     };
 
+    // 重新上传：清空当前审阅状态并回到主页（上传入口）
+    const handleReUpload = () => {
+        resetRiskData();
+        if (typeof window !== "undefined") {
+            // 清除审阅工作区与上传缓存，保证主页呈现全新上传界面
+            ["review_workspace_active", "review_session_id", "uploaded_file_url",
+                "uploaded_file_id", "uploaded_file_title", "uploaded_party_a",
+                "uploaded_party_b", "uploaded_file_type", "uploaded_contract_type_id",
+            ].forEach((k) => window.localStorage.removeItem(k));
+        }
+        router.push("/");
+    };
+
     const renderSideContent = () => {
         switch (activeTab) {
             case "check":
@@ -607,6 +620,19 @@ export default function ReviewPageContent() {
                             overflow: "hidden",
                         }}
                     >
+                        <div
+                            className="flex items-center justify-between gap-3 px-4 py-2 bg-white border-b border-[#e3e3e3]"
+                            style={{zIndex: 10000, pointerEvents: isReviewing ? 'none' : 'auto'}}
+                        >
+                            <div className="flex items-center gap-2 min-w-0">
+                                <span className="text-[0.88rem] text-[#333] truncate max-w-[22rem]" title={title}>
+                                    {title || "合同文档"}
+                                </span>
+                            </div>
+                            <Button size="small" onClick={handleReUpload}>
+                                重新上传
+                            </Button>
+                        </div>
                         <div style={{zIndex: 10000, pointerEvents: isReviewing ? 'none' : 'auto'}}>
                             <EditorToolbar
                                 editor={canvasEditorRef.current}
