@@ -85,6 +85,7 @@ func (a *CandidateRiskAgent) ExecuteBatchWithCallback(
 	meta ContractMeta,
 	onCandidates func(index int, clause Clause, candidates []RiskCandidate, completed int, total int),
 	onClauseResult func(index int, clause Clause, candidates []RiskCandidate, findings []RiskFinding, completed int, total int),
+	reflectionHints []string,
 ) ([]RiskFinding, []ThinkStep, error) {
 	if len(clauses) == 0 {
 		return nil, nil, nil
@@ -111,7 +112,7 @@ func (a *CandidateRiskAgent) ExecuteBatchWithCallback(
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			findings, step, err := a.reviewCandidateBatch(ctx, idx, items, meta)
+			findings, step, err := a.reviewCandidateBatch(ctx, idx, items, meta, reflectionHints)
 			resultChan <- batchResult{
 				batchIndex: idx,
 				findings:   findings,
@@ -242,9 +243,9 @@ func (a *CandidateRiskAgent) retrieveClauseCandidates(ctx context.Context, claus
 	return candidates, nil
 }
 
-func (a *CandidateRiskAgent) reviewCandidateBatch(ctx context.Context, batchIndex int, sets []candidateClauseSet, meta ContractMeta) ([]RiskFinding, ThinkStep, error) {
+func (a *CandidateRiskAgent) reviewCandidateBatch(ctx context.Context, batchIndex int, sets []candidateClauseSet, meta ContractMeta, reflectionHints []string) ([]RiskFinding, ThinkStep, error) {
 	start := time.Now()
-	prompt := buildCandidateRiskPrompt(sets, meta)
+	prompt := buildCandidateRiskPrompt(sets, meta, reflectionHints)
 	messages := []*schema.Message{
 		{
 			Role:    schema.System,
@@ -350,7 +351,7 @@ func riskCandidateFromSearchResult(result rag.SearchResult) RiskCandidate {
 	return candidate
 }
 
-func buildCandidateRiskPrompt(sets []candidateClauseSet, meta ContractMeta) string {
+func buildCandidateRiskPrompt(sets []candidateClauseSet, meta ContractMeta, reflectionHints []string) string {
 	type promptClause struct {
 		ID         string          `json:"id"`
 		Title      string          `json:"title"`
@@ -359,13 +360,15 @@ func buildCandidateRiskPrompt(sets []candidateClauseSet, meta ContractMeta) stri
 		Candidates []RiskCandidate `json:"candidates"`
 	}
 	payload := struct {
-		ContractMeta ContractMeta   `json:"contract_meta"`
-		Clauses      []promptClause `json:"clauses"`
-		OutputSchema string         `json:"output_schema"`
+		ContractMeta    ContractMeta   `json:"contract_meta"`
+		Clauses         []promptClause `json:"clauses"`
+		ReflectionHints []string       `json:"reflection_hints,omitempty"`
+		OutputSchema    string         `json:"output_schema"`
 	}{
-		ContractMeta: meta,
-		Clauses:      make([]promptClause, 0, len(sets)),
-		OutputSchema: `{"findings":[{"finding_id":"clause-id-risk-1","clause_id":"条款ID","candidate_ids":["候选ID"],"risk_type":"风险类型","risk_level":"高/中/低","risk_description":"风险描述","original_text":"原文摘录","legal_basis":[{"source":"来源","article":"条款/风险点ID","content":"依据摘要","relevance":0.8}],"verified":true,"requires_human_review":false,"confidence":0.8,"suggested_text":"可直接替换或补充的条款文本","suggestion_reason":"修改理由","priority":"必须修改/建议修改/可选修改"}]}`,
+		ContractMeta:    meta,
+		Clauses:         make([]promptClause, 0, len(sets)),
+		ReflectionHints: reflectionHints,
+		OutputSchema:    `{"findings":[{"finding_id":"clause-id-risk-1","clause_id":"条款ID","candidate_ids":["候选ID"],"risk_type":"风险类型","risk_level":"高/中/低","risk_description":"风险描述","original_text":"原文摘录","legal_basis":[{"source":"来源","article":"条款/风险点ID","content":"依据摘要","relevance":0.8}],"verified":true,"requires_human_review":false,"confidence":0.8,"suggested_text":"可直接替换或补充的条款文本","suggestion_reason":"修改理由","priority":"必须修改/建议修改/可选修改"}]}`,
 	}
 	for _, set := range sets {
 		payload.Clauses = append(payload.Clauses, promptClause{
@@ -738,4 +741,5 @@ const candidateRiskSystemPrompt = `你是一名资深合同审查律师。当前
 2. verified=true 仅用于有候选风险点、审阅规范或法律依据支持的风险；legal_basis 必须引用对应 candidate_id 或候选依据。
 3. 如果候选未命中但条款仍存在明显法律、履约或表述风险，可以输出 verified=false、requires_human_review=true 的“待人工确认风险”。
 4. 修改建议优先使用候选中的推荐修改模板；没有模板时给出可直接替换或补充的条款文本。
-5. 只输出 JSON，不输出解释性前后缀。`
+5. 如果输入中包含 reflection_hints（反思要点），表示上一轮审阅存在遗漏，请优先针对这些要点补充检查这些条款，不要遗漏。
+6. 只输出 JSON，不输出解释性前后缀。`
