@@ -86,6 +86,7 @@ func (a *CandidateRiskAgent) ExecuteBatchWithCallback(
 	onCandidates func(index int, clause Clause, candidates []RiskCandidate, completed int, total int),
 	onClauseResult func(index int, clause Clause, candidates []RiskCandidate, findings []RiskFinding, completed int, total int),
 	reflectionHints []string,
+	onBatchProgress func(completed int, total int),
 ) ([]RiskFinding, []ThinkStep, error) {
 	if len(clauses) == 0 {
 		return nil, nil, nil
@@ -135,6 +136,10 @@ func (a *CandidateRiskAgent) ExecuteBatchWithCallback(
 		allSteps = append(allSteps, result.steps...)
 		for _, finding := range result.findings {
 			findingsByClause[finding.ClauseID] = append(findingsByClause[finding.ClauseID], finding)
+		}
+		// 每个批次审阅完成后上报一次进度，避免进度条在长 LLM 调用期间停滞。
+		if onBatchProgress != nil {
+			onBatchProgress(i+1, len(batches))
 		}
 	}
 

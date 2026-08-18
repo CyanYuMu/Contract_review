@@ -199,6 +199,16 @@ func (o *ReviewOrchestrator) ReviewContract(
 			}
 		},
 		nil, // 正常审阅无反思反馈
+		func(completed int, total int) {
+			// 每个批次 LLM 审阅完成后上报进度，避免进度条在长 LLM 调用期间停滞。
+			progress := 0.40
+			if total > 0 {
+				progress += 0.02 * float64(completed) / float64(total)
+			}
+			callbacks.emitProgress("risk_identify", "CandidateRiskAgent", "running",
+				fmt.Sprintf("正在审阅条款 %d/%d...", completed, total),
+				progress, nil)
+		},
 	)
 	if err != nil {
 		global.Log.Error("Phase 3 风险识别失败", zap.Error(err))
@@ -314,6 +324,10 @@ func (o *ReviewOrchestrator) ReviewContract(
 				}
 			},
 			hints,
+			func(completed int, total int) {
+				callbacks.emitProgress("reflection", "CandidateRiskAgent", "running",
+					fmt.Sprintf("反思重审条款 %d/%d...", completed, total), 0.88, nil)
+			},
 		)
 		if rErr != nil {
 			global.Log.Warn("反思重审失败", zap.Int("reflection", report.ReflectionCount), zap.Error(rErr))
