@@ -507,20 +507,25 @@ export default function RiskCard({riskDataList: propRiskDataList = [], editor}: 
                 return;
             }
 
-            let located = false;
+            // 优先级2: docx 导入渲染为 contenteditable HTML，编辑器元素列表为空，
+            // 改用字符映射器在 DOM 中定位并替换。
             if (mapperRef.current) {
-                located = tryCharacterMapper(mapperRef.current, cleanedOriginal);
-            }
-            if (!located) {
-                located = await tryDOMSearch(cleanedOriginal);
+                const mapperReplaced = tryCharacterMapperReplace(
+                    mapperRef.current,
+                    cleanedOriginal,
+                    cleanedSuggestion
+                );
+                if (mapperReplaced) {
+                    removeRiskData(riskId);
+                    addReplacedNum();
+                    toast.success("修订成功");
+                    return;
+                }
             }
 
+            // 定位失败：弹出原文，便于人工查找
             showModal(cleanedOriginal);
-            toast.error(
-                located
-                    ? "已定位到疑似原文，但未能安全应用修订，请人工确认后修改"
-                    : "未能安全定位原文，已停止自动修订"
-            );
+            toast.error("未能安全定位原文，已停止自动修订");
         } catch {
             toast.error("替换操作失败，请稍后重试");
         }
@@ -904,6 +909,51 @@ function tryCharacterMapper(
     }
 
     return false;
+}
+
+/**
+ * 尝试使用字符映射器在 DOM 中替换原文。
+ * docx 导入会把文档渲染成 contenteditable HTML（编辑器 elementList 为空），
+ * 因此修订必须直接操作 DOM：定位原文范围 -> 删除 -> 插入修订建议。
+ */
+function tryCharacterMapperReplace(
+    mapper: CharacterMapper,
+    searchText: string,
+    replaceText: string
+): boolean {
+    const match = mapper.smartFind(searchText);
+    if (!match) return false;
+
+    const textRange = mapper.getRange(match.start, match.end);
+    if (!textRange) return false;
+
+    try {
+        const range = document.createRange();
+        range.setStart(textRange.startNode, textRange.startOffset);
+        range.setEnd(textRange.endNode, textRange.endOffset);
+
+        // 删除原文本，插入修订建议（保留为纯文本，避免 HTML 注入）
+        range.deleteContents();
+        const textNode = document.createTextNode(replaceText);
+        range.insertNode(textNode);
+
+        // 选中新插入的文本，方便用户查看或继续编辑
+        const selection = window.getSelection();
+        if (selection) {
+            const nextRange = document.createRange();
+            nextRange.setStart(textNode, 0);
+            nextRange.setEnd(textNode, replaceText.length);
+            selection.removeAllRanges();
+            selection.addRange(nextRange);
+        }
+
+        // 替换后重建映射
+        setTimeout(() => mapper.rebuild?.(), 300);
+        return true;
+    } catch (e) {
+        console.warn("字符映射替换失败:", e);
+        return false;
+    }
 }
 
 /**
