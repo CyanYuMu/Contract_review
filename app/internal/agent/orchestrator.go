@@ -193,6 +193,7 @@ func (o *ReviewOrchestrator) ReviewContract(
 				callbacks.emitFinding(finding)
 			}
 		},
+		nil, // 正常审阅无反思反馈
 	)
 	if err != nil {
 		global.Log.Error("Phase 3 风险识别失败", zap.Error(err))
@@ -251,23 +252,75 @@ func (o *ReviewOrchestrator) ReviewContract(
 	global.Log.Info("Phase 4 完成",
 		zap.Int("suggestionCount", len(report.Suggestions)))
 
-	// ============ Phase 5: 质量评估（QualityGate） ============
-	// 说明: 真正的 Reflection 重试（依据反馈重新审阅遗漏条款）尚未实现。
-	// 此前 for retry 循环在 ShouldReflect 命中后并未重新调用 RiskAgent，仅空转更新计数，
-	// 故此处改为单次质量评估，产出评分与关键缺口供前端展示与人工复核，不再空转。
+	// ============ Phase 5: 质量评估 + Reflection 反思重审 ============
+	// 真 Reflection：质量门评估产出评分与缺口后，若存在"无风险发现的缺口条款"且质量信号要求重审，
+	// 则把缺口作为反思反馈注入 CandidateRiskAgent，对缺口条款定向重审（不做全量重审），
+	// 合并新发现后重新评估，直至无缺口 / 质量达标 / 达到最大反思轮数。
 	callbacks.emitProgress("quality", "QualityGate", "running",
 		"正在进行质量评估...", 0.85, nil)
 
 	report.ReflectionCount = 0
-	if eval, err := o.qualityGate.Evaluate(ctx, report); err != nil {
-		global.Log.Warn("质量评估失败", zap.Error(err))
-	} else {
+	for {
+		eval, err := o.qualityGate.Evaluate(ctx, report)
+		if err != nil {
+			global.Log.Warn("质量评估失败", zap.Error(err))
+			break
+		}
 		report.QualityScore = eval.OverallScore
 		global.Log.Info("质量评估结果",
 			zap.Float64("score", eval.OverallScore),
+			zap.Int("reflection", report.ReflectionCount),
 			zap.Strings("gaps", eval.CriticalGaps))
-		callbacks.emitProgress("quality", "QualityGate", "completed",
-			fmt.Sprintf("质量评估完成 (评分: %.2f)", eval.OverallScore), 0.9, eval)
+
+		gapClauses := findGapClauses(clauses, report.Findings)
+		qualitySignal := eval.ShouldRetry || eval.OverallScore < o.qualityGate.config.ConfidenceThreshold
+		canReflect := o.qualityGate.config.Enabled &&
+			report.ReflectionCount < o.qualityGate.config.MaxRetries &&
+			len(gapClauses) > 0 &&
+			qualitySignal
+
+		if !canReflect {
+			callbacks.emitProgress("quality", "QualityGate", "completed",
+				fmt.Sprintf("质量评估完成 (评分: %.2f)", eval.OverallScore), 0.9, eval)
+			break
+		}
+
+		report.ReflectionCount++
+		callbacks.emitProgress("reflection", "QualityGate", "running",
+			fmt.Sprintf("反思第 %d 轮：定向重审 %d 个缺口条款", report.ReflectionCount, len(gapClauses)),
+			0.86,
+			map[string]interface{}{
+				"reflection":  report.ReflectionCount,
+				"gap_clauses": len(gapClauses),
+			})
+
+		hints := buildReflectionHints(eval)
+		newFindings, _, rErr := o.riskAgent.ExecuteBatchWithCallback(
+			ctx,
+			gapClauses,
+			meta,
+			func(index int, clause Clause, candidates []RiskCandidate, completed int, total int) {
+				callbacks.emitProgress("reflection", "CandidateRiskAgent", "running",
+					fmt.Sprintf("反思重审候选检索 %d/%d", completed, total), 0.87, nil)
+			},
+			func(index int, clause Clause, candidates []RiskCandidate, clauseFindings []RiskFinding, completed int, total int) {
+				for _, finding := range clauseFindings {
+					callbacks.emitFinding(finding)
+				}
+			},
+			hints,
+		)
+		if rErr != nil {
+			global.Log.Warn("反思重审失败", zap.Int("reflection", report.ReflectionCount), zap.Error(rErr))
+			break
+		}
+
+		report.Findings = MergeFindings(append(report.Findings, newFindings...))
+		global.Log.Info("反思重审完成",
+			zap.Int("reflection", report.ReflectionCount),
+			zap.Int("newFindings", len(newFindings)),
+			zap.Int("totalFindings", len(report.Findings)))
+		// 继续下一轮质量评估
 	}
 
 	// ============ Phase 6: 报告生成 ============
@@ -289,6 +342,41 @@ func (o *ReviewOrchestrator) ReviewContract(
 		zap.Int("tokensUsed", report.TokensUsed))
 
 	return report, nil
+}
+
+// findGapClauses 返回没有任何风险发现（含 ClauseIDs）覆盖的条款，作为反思重审的"缺口条款"。
+func findGapClauses(clauses []Clause, findings []RiskFinding) []Clause {
+	covered := make(map[string]bool, len(findings))
+	for _, f := range findings {
+		if f.ClauseID != "" {
+			covered[f.ClauseID] = true
+		}
+		for _, cid := range f.ClauseIDs {
+			if cid != "" {
+				covered[cid] = true
+			}
+		}
+	}
+	var gaps []Clause
+	for _, c := range clauses {
+		if !covered[c.ID] {
+			gaps = append(gaps, c)
+		}
+	}
+	return gaps
+}
+
+// buildReflectionHints 由质量评估结果构建反思反馈，注入下一轮重审提示词。
+func buildReflectionHints(eval *QualityEvaluation) []string {
+	if eval == nil {
+		return nil
+	}
+	hints := make([]string, 0, len(eval.CriticalGaps)+1)
+	hints = append(hints, eval.CriticalGaps...)
+	if strings.TrimSpace(eval.Feedback) != "" {
+		hints = append(hints, "改进建议："+strings.TrimSpace(eval.Feedback))
+	}
+	return hints
 }
 
 // calculateOverallRisk 计算整体风险等级
