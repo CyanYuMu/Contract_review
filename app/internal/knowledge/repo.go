@@ -17,6 +17,25 @@ func NewRepo(db *gorm.DB) *Repo {
 	return &Repo{db: db}
 }
 
+// CreateDocument 创建知识库文档。
+func (r *Repo) CreateDocument(ctx context.Context, doc *ReviewKnowledgeDoc) error {
+	if r == nil || r.db == nil {
+		return errors.New("knowledge repo: db is nil")
+	}
+	return r.db.WithContext(ctx).Create(doc).Error
+}
+
+// CreateChunks 批量创建文档分块（需在 doc 已创建、doc.ID 就绪后调用）。
+func (r *Repo) CreateChunks(ctx context.Context, chunks []ReviewKnowledgeChunk) error {
+	if r == nil || r.db == nil {
+		return errors.New("knowledge repo: db is nil")
+	}
+	if len(chunks) == 0 {
+		return nil
+	}
+	return r.db.WithContext(ctx).Create(&chunks).Error
+}
+
 // IndexedChunkRow JOIN 查询结果，供 rag 包组装为 Chunk
 type IndexedChunkRow struct {
 	ChunkID       uint64 `gorm:"column:chunk_id"`
