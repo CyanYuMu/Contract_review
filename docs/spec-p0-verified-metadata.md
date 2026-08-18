@@ -130,8 +130,10 @@ requiresHumanReview := raw.RequiresHumanReview || !verified
 - [ ] **检索置信度路由**：候选为空或最高分低于阈值时才触发二次泛化检索（去标题、扩 TopK、走 Rerank），而非每条款固定检索两趟。
 - [ ] **法律专业问题路由（可选）**：区分"纯审阅规范问题"（付款节点不明）vs"法律专业问题"（违约金上限/竞业期限），后者才触发法规条文级验证。
 
-### P1-4 跨条款去重合并（报告质量）
-- [ ] Agent 层按 `(risk_type, 归一化 legal_basis)` 归并多条款命中的同一风险，保留多个 `ClauseID`（当前只在 SSE `stableKey` 层去重）。
+### P1-4 跨条款去重合并（报告质量）— ✅ 已完成
+- [x] 新增 `agent.MergeFindings`：按候选风险点 ID（或风险类型+法律依据）归并多条款重复风险，保留 `ClauseIDs`，聚合最严重等级/最高置信度/已验证/待复核，主条款取最早条款。
+- [x] `ExecuteBatchWithCallback` 在分发回调前合并，流式输出与最终报告一致，避免重复行。
+- [x] `buildRiskAnalysis` 命中多条款时展示"命中条款"列表。
 
 ### P1-5 真 Reflection（覆盖率，把质量门反馈注入重审）
 - [ ] `QualityGate` 的 `ShouldReflect` 目前是死代码。改为：`ShouldRetry && CriticalGaps` 非空时，**只对缺口条款定向重审**（把 gaps 注入 `CandidateRiskAgent` 下一轮），`ReflectionCount++`，超过 `MaxRetries` 强制停；不做全量重审。
