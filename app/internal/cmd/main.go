@@ -13,6 +13,7 @@ import (
 	"contract_review/app/internal/gateway"
 	"contract_review/app/internal/global"
 	"contract_review/app/internal/knowledge"
+	"contract_review/app/internal/knowledgeapi"
 	"contract_review/app/internal/middleware"
 	"contract_review/app/internal/middleware/jwt_auth"
 	"contract_review/app/internal/middleware/redis"
@@ -179,6 +180,7 @@ func main() {
 	reviewService := review.NewReviewService(reviewRepo, reviewResultRepo, db, global.Redis)
 	riskPointService := riskconfig.NewService(riskPointRepo, db)
 	comparisonService := comparison.NewComparisonService(comparisonRepo, contractRepo, db, global.Redis)
+	knowledgeAPIService := knowledgeapi.NewService(db)
 
 	qaService := qa.NewQAService(db, contractService)
 
@@ -192,6 +194,7 @@ func main() {
 	modelConfigHandler := modelconfig.NewHandler(modelConfigService)
 	gatewayHandler := gateway.NewHandler(global.Gateway)
 	qaHandler := qa.NewQAHandler(qaService)
+	knowledgeAPIHandler := knowledgeapi.NewHandler(knowledgeAPIService)
 
 	// P0 收尾：为存量风险点分块补齐结构化 metadata（幂等，仅更新 metadata IS NULL 的分块）。
 	// 必须在预热审阅编排器之前执行，确保关键词/向量索引加载到的是补齐后的 metadata。
@@ -274,6 +277,9 @@ func main() {
 	api.PUT("/contract_type/update/:id", authMW, scopeMW, adminMW, contractHandler.UpdateContractTypeName)
 	api.DELETE("/contract_type/delete/:id", authMW, scopeMW, adminMW, contractHandler.DeleteContractType)
 	api.DELETE("/contract_type/batchdelete", authMW, scopeMW, adminMW, contractHandler.BatchDeleteContractType)
+
+	// ============ Knowledge 路由（长文档入库） ============
+	api.POST("/knowledge/document", authMW, scopeMW, adminMW, knowledgeAPIHandler.IngestDocument)
 
 	// ============ Risk Point 路由 ============
 	api.POST("/risk_point/create", authMW, scopeMW, adminMW, riskPointHandler.Create)
