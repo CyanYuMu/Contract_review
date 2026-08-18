@@ -209,8 +209,21 @@ func (a *CandidateRiskAgent) retrieveCandidates(
 	return results
 }
 
-// generalRetrievalThreshold 首轮检索（含分层）候选数低于该值时触发"泛化二次检索"。
+// generalRetrievalThreshold 首轮检索（含分层）候选数低于该值时触发"泛化二次检索"（标准强度）。
 const generalRetrievalThreshold = 3
+
+// generalizedRetrievalThresholdFor 按审查强度返回泛化检索触发阈值：
+// 严格 → 更易触发泛化召回（宁多勿漏）；宽松 → 仅零候选才泛化；标准 → 默认值。
+func generalizedRetrievalThresholdFor(intensity string) int {
+	switch intensity {
+	case "严格":
+		return 5
+	case "宽松":
+		return 1
+	default:
+		return generalRetrievalThreshold
+	}
+}
 
 func (a *CandidateRiskAgent) retrieveClauseCandidates(ctx context.Context, clause Clause, meta ContractMeta) ([]RiskCandidate, error) {
 	if a.retriever == nil {
@@ -229,8 +242,8 @@ func (a *CandidateRiskAgent) retrieveClauseCandidates(ctx context.Context, claus
 	}
 
 	// 检索置信度路由：首轮召回不足时，用"泛化查询"（去标题/正文，只留法律关键词）二次召回，
-	// 避免每条款固定多趟检索，仅在必要时才扩召回。
-	if len(results) < generalRetrievalThreshold {
+	// 避免每条款固定多趟检索，仅在必要时才扩召回；触发阈值随审查强度调整。
+	if len(results) < generalizedRetrievalThresholdFor(meta.Intensity) {
 		if gq := buildGeneralizedQuery(clause, meta); gq != "" {
 			if more, gErr := a.retriever.RetrieveTopK(gq, nil, a.config.CandidateTopK); gErr == nil {
 				results = append(results, more...)
@@ -781,4 +794,5 @@ const candidateRiskSystemPrompt = `你是一名资深合同审查律师。当前
 4. 修改建议优先使用候选中的推荐修改模板；没有模板时给出可直接替换或补充的条款文本。
 5. 如果输入中包含 reflection_hints（反思要点），表示上一轮审阅存在遗漏，请优先针对这些要点补充检查这些条款，不要遗漏。
 6. 输入中 contract_meta.overview 提供合同整体结构（全部条款标题与分类），请结合全合同上下文判断跨条款/上下文不一致风险，不要孤立地看单个条款。
-7. 只输出 JSON，不输出解释性前后缀。`
+7. 根据 contract_meta.intensity 调整审阅严格度：严格→识别所有潜在风险、宁多勿漏；标准→重点审核心风险领域；宽松→仅指出重大法律风险。
+8. 只输出 JSON，不输出解释性前后缀。`
