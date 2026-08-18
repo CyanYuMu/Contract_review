@@ -109,8 +109,8 @@ requiresHumanReview := raw.RequiresHumanReview || !verified
 
 > 建议按顺序推进，每阶段同样"编译 + 单测 + 冒烟 + 端到端"验收。
 
-### P0 收尾（可选，低风险）
-- [ ] **旧风险点补 metadata**：已存在的风险点（如当前库里的 `RP000001`）其 chunk metadata 仍为 NULL。可写一次性迁移脚本，遍历 `review_risk_points` 重新执行 `syncKnowledgeDoc`（等价于逐条 update），让存量数据也享受结构化 metadata。
+### P0 收尾（可选，低风险）— ✅ 已完成
+- [x] **旧风险点补 metadata**：新增 `riskconfig.Service.BackfillRiskPointMetadata`（幂等，复用 `buildRiskPointMetadataJSON`，仅更新 `metadata IS NULL` 的存量分块），并在 `main.go` 启动时、预热编排器之前调用。验证：`meta_covered` 由 0 → 1，二次启动无重复补齐。
 
 ### P1-1 真混合检索（召回精度）— ✅ 已完成
 - [x] `SimpleKeywordIndex.Search` 从"TF 子串匹配"升级为**含 IDF 的 BM25**（k1=1.2, b=0.75），分数经 `score/(score+norm)` 归一化到 (0,1)。
