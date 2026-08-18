@@ -215,6 +215,10 @@ export default function ReviewPanel({
                 }
             }
 
+            // 立即跳转到审阅页，避免停留在首页阻塞等待 SSE 连接（SSE 建立前先展示"审阅中"）。
+            // 连接失败由 startTask 的 onError/.catch 在审阅页内处理。
+            router.push("/review");
+
             toast.success("任务已启动", {id: startKey});
             toast.dismiss("create-task-hint");
             setLoading(false);
@@ -229,8 +233,7 @@ export default function ReviewPanel({
                     description: payload.description ?? null,
                 },
                 () => {
-                    // F2: SSE 连接成功后再导航，避免连接失败时用户跳到空审阅页只剩 toast
-                    router.push("/review");
+                    // SSE 已连接，导航已在上方完成，此处无需再次跳转
                 },
                 (risk) => {
                     addRiskData(risk);

@@ -43,12 +43,13 @@ export default function TopbarTabs({
             return;
         }
 
-        if (
-            tab === "check" &&
-            typeof window !== "undefined" &&
-            window.localStorage.getItem("review_workspace_active") === "1"
-        ) {
-            router.push("/review");
+        // "合同审阅"始终回到首页（重新上传入口）；审阅中的工作区通过"智审记录"进入，
+        // 避免 review_workspace_active 残留导致点击"合同审阅"仍停留在带合同的 /review。
+        if (tab === "check") {
+            if (typeof window !== "undefined") {
+                window.localStorage.removeItem("review_workspace_active");
+            }
+            router.push(tabRoutes[tab]);
             return;
         }
 
