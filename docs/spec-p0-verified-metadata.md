@@ -123,7 +123,7 @@ requiresHumanReview := raw.RequiresHumanReview || !verified
 - [x] 小子块（maxChunkSize=300、带 overlap、句末断句）用于检索，命中后按 `ParentChunkID` 回填父块（整章/整条）并按 parent 去重。
 - [x] `review_knowledge_chunks` 表加 `parent_chunk_id / chunk_type` 列（迁移）。
 - [x] `DocumentProcessor` 复活为父子分块产出器（child 检索 + parent 上下文，仅 child 生成 embedding）。
-- [ ]（待接）长文档实际入库入口：当前知识库入口为风险点自动同步 + 种子 SQL，`DocumentProcessor` 已就绪，后续新增知识库文档上传 API 或长文档入库时调用。
+- [x] **长文档入库入口**：新增 `rag.IngestKnowledgeDocument`（父子分块 + 持久化，事务内用真实 doc.ID 生成 chunk ID）+ `knowledgeapi` 包（`POST /api/knowledge/document` 管理端接口）。验证：入库长文档 → DB 读出 1 parent + 5 child 全部正确联动，预热日志 `parents=1 child_chunks=5`。
 
 ### P1-3 自适应检索 / Self-RAG（性能 + 精度，轻量路由）
 - [ ] **条款级路由（确定性）**：`classifyClauses` 后跳过首部/签署页/送达通知等 boilerplate 条款，不检索不审阅。
